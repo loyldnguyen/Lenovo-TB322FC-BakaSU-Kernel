@@ -554,6 +554,34 @@ jobs:
             echo "::warning::SUSFS patch left rejected hunks: $(echo "$REJECTS" | tr '\n' ' ')"
           fi
 
+      - name: 🔧 Enable SUSFS priority UID filter
+        if: ${{ env.ENABLE_SUSFS == 'true' }}
+        run: |
+          set -euo pipefail
+          cd kernel_workspace
+          SYM=KSU_SUSFS_PRIORITY_UID_FILTER
+          DEFCONFIG=./common/arch/arm64/configs/gki_defconfig
+          KCONFIG="$(readlink -f common/drivers/kernelsu)/Kconfig"
+
+          # BakaSU (sync-up) calls susfs_set_priority_uid_filter() and
+          # susfs_parse_priority_app_strings() unconditionally, while the SUSFS
+          # kernel side only defines them when CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER is on.
+          if ! grep -qs "CONFIG_${SYM}" common/fs/susfs.c common/include/linux/susfs.h; then
+            echo "::warning::SUSFS kernel patch has no CONFIG_${SYM} guard; nothing to enable."
+            exit 0
+          fi
+          if [ ! -f "$KCONFIG" ]; then
+            echo "::error::BakaSU Kconfig not found: $KCONFIG"
+            exit 1
+          fi
+          if grep -qE "^[[:space:]]*(menu)?config[[:space:]]+${SYM}([[:space:]]|$)" "$KCONFIG"; then
+            echo "${SYM} is already defined in BakaSU Kconfig."
+          else
+            printf '\nconfig %s\n\tbool "SUSFS priority UID filter"\n\tdepends on KSU_SUSFS\n\tdefault y\n' "$SYM" >> "$KCONFIG"
+            echo "Inserted ${SYM} into $KCONFIG"
+          fi
+          echo "CONFIG_${SYM}=y" >> "$DEFCONFIG"
+
       - name: 🔧 Set gki_defconfig
         run: |
           cd kernel_workspace
