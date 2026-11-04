@@ -11,7 +11,7 @@ on:
       ksu_ref:
         description: "BakaSU branch"
         required: false
-        default: ''
+        default: 'sync-up'
 
       releases:
         description: "ZUXOS Version"
@@ -245,12 +245,16 @@ jobs:
           echo "Source archive: $COMMON_ARCHIVE_URL"
           (
             for i in 1 2 3; do
-              if aria2c -s16 -x16 -k1M "$COMMON_ARCHIVE_URL" -o common.tar.gz; then
-                mkdir -p common && tar -xzf common.tar.gz -C common && rm -f common.tar.gz
-                exit $?
+              rm -rf common common.tar.gz common.tar.gz.aria2
+              if aria2c -s16 -x16 -k1M "$COMMON_ARCHIVE_URL" -o common.tar.gz \
+                 && gzip -t common.tar.gz \
+                 && mkdir -p common \
+                 && tar -xzf common.tar.gz -C common; then
+                rm -f common.tar.gz
+                exit 0
               fi
-              echo "Download failed (attempt $i)."
-              if [ "$i" -lt 3 ]; then sleep 180; fi
+              echo "Download or extract failed (attempt $i)."
+              if [ "$i" -lt 3 ]; then sleep 60; fi
             done
             exit 1
           ) &
