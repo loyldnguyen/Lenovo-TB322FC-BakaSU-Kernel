@@ -1,0 +1,354 @@
+name: Build Lenovo TB320FC BakaSU Kernel
+run-name: ${{ inputs.kernel_suffix }} (BakaSU ${{ inputs.ksu_ref }})
+
+permissions:
+  contents: read
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_ref:
+        description: "BakaSU"
+        required: false
+        default: 'sync-up'
+
+      susfs_ref:
+        description: "SUSFS branch"
+        required: false
+        default: 'gki-android12-5.10'
+
+      kernel_commit:
+        description: "kernel commit"
+        required: false
+        default: '6aaee44d50609be8d40c91ffffd0c24741d8c924'
+
+      kernel_suffix:
+        description: "Kernel suffix"
+        required: false
+        default: '-android12-9-g6aaee44d5060'
+
+      kernel_time:
+        description: "Build timestamp"
+        required: false
+        default: 'Sun Dec 01 08:10:00 UTC 2024'
+
+      lto:
+        description: "LTO mode (full = stock, thin = faster build)"
+        required: true
+        type: choice
+        options:
+          - 'thin'
+          - 'full'
+        default: 'thin'
+
+      kernel_module_impl:
+        description: "Kernel module implementation"
+        required: true
+        type: choice
+        options:
+          - 'N/A'
+          - 'KPN'
+        default: 'N/A'
+
+      enable_susfs:
+        description: "SUSFS support"
+        required: true
+        default: true
+        type: boolean
+
+      enable_bbr_ecn:
+        description: "BBR+ECN support"
+        required: true
+        default: true
+        type: boolean
+
+      enable_unicode_bypass:
+        description: "Fix Unicode invisible character bypass"
+        required: true
+        default: true
+        type: boolean
+
+jobs:
+  build:
+    name: Build 5.10.233${{ inputs.kernel_suffix }}
+    runs-on: ubuntu-24.04
+    env:
+      KSU_TYPE: BakaSU
+      KSU_REPO: Baka-SU/BakaSU
+      KSU_REF: ${{ inputs.ksu_ref }}
+      SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+      SUSFS_REF: ${{ inputs.susfs_ref }}
+      KERNEL_COMMIT: ${{ inputs.kernel_commit }}
+      KERNEL_SUFFIX: ${{ inputs.kernel_suffix }}
+      KERNEL_TIME: ${{ inputs.kernel_time }}
+      LTO_MODE: ${{ inputs.lto }}
+      KERNEL_MODULE_IMPL: ${{ inputs.kernel_module_impl }}
+      ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+      ENABLE_BBR_ECN: ${{ inputs.enable_bbr_ecn }}
+      ENABLE_UNICODE_BYPASS: ${{ inputs.enable_unicode_bypass }}
+      # Stock android12-5.10 toolchain (build.config.common: clang-r416183b)
+      CLANG_VERSION: r416183b
+      CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-release/clang-r416183b.tar.gz
+      STOCK_BUILD_USER: build-user
+      STOCK_BUILD_HOST: build-host
+      CCACHE_DIR: /home/runner/.ccache
+      CCACHE_MAXSIZE: 8G
+    steps:
+      - name: 🧹 Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL &
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            bc bison flex cpio libssl-dev libelf-dev ccache zip unzip python-is-python3 aria2
+          wait
+          df -h /
+
+      - name: 📥 Restore clang cache
+        id: clang-cache
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: clang-${{ env.CLANG_VERSION }}-v1
+
+      - name: 🛠 Download clang ${{ env.CLANG_VERSION }}
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p clang
+          for i in 1 2 3; do
+            if curl -fsSL "$CLANG_URL" -o clang.tgz && gzip -t clang.tgz; then break; fi
+            echo "Download failed (attempt $i)"; rm -f clang.tgz; sleep 30
+          done
+          tar -xzf clang.tgz -C clang
+          rm -f clang.tgz
+
+      - name: 📥 Fetch kernel source @ ${{ env.KERNEL_COMMIT }}
+        run: |
+          set -euo pipefail
+          mkdir -p kernel_workspace/common
+          cd kernel_workspace/common
+          git init -q
+          git remote add origin https://android.googlesource.com/kernel/common
+          for i in 1 2 3; do
+            git fetch --depth 1 origin "$KERNEL_COMMIT" && break
+            echo "Fetch failed (attempt $i)"; sleep 30
+          done
+          git checkout -q FETCH_HEAD
+          git log -1 --format='Kernel: %H %s'
+          make -s kernelversion
+          # Not present on 5.10, harmless if missing
+          rm -f android/abi_gki_protected_exports_* || true
+
+      - name: ⚙️ Set up BakaSU
+        run: |
+          set -euo pipefail
+          cd kernel_workspace
+          curl -fLSs "https://raw.githubusercontent.com/${KSU_REPO}/${KSU_REF}/kernel/setup.sh" | bash -s "$KSU_REF"
+          cd KernelSU
+          KSU_COMMIT_SHA="$(git rev-parse HEAD)"
+          KSU_VERSION=$((30700 + $(git rev-list --count HEAD)))
+          echo "KSU_COMMIT_SHA=$KSU_COMMIT_SHA" >> "$GITHUB_ENV"
+          echo "KSUVER=$KSU_VERSION" >> "$GITHUB_ENV"
+          echo "BakaSU $KSU_REF -> $KSU_COMMIT_SHA (version $KSU_VERSION)"
+
+      - name: 🔧 Set up SUSFS
+        if: ${{ env.ENABLE_SUSFS == 'true' }}
+        run: |
+          set -euo pipefail
+          cd kernel_workspace
+          git clone -q "$SUSFS_REPO" susfs4ksu
+          git -C susfs4ksu checkout -q "$SUSFS_REF"
+          git -C susfs4ksu log -1 --format='SUSFS: %H %s'
+          grep -m1 SUSFS_VERSION susfs4ksu/kernel_patches/include/linux/susfs.h
+
+          PATCH=50_add_susfs_in_gki-android12-5.10.patch
+          cp susfs4ksu/kernel_patches/$PATCH common/
+          cp susfs4ksu/kernel_patches/fs/* common/fs/
+          cp susfs4ksu/kernel_patches/include/linux/* common/include/linux/
+          cd common
+          patch -p1 --forward < "$PATCH" | tee ../susfs_patch.log
+          if find . -name '*.rej' | grep -q .; then
+            echo "::error::SUSFS patch has rejected hunks:"
+            find . -name '*.rej' -print -exec cat {} \;
+            exit 1
+          fi
+
+      - name: 🔧 Apply Unicode bypass fix
+        if: ${{ env.ENABLE_UNICODE_BYPASS == 'true' }}
+        run: |
+          cd kernel_workspace/common
+          wget -q "https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/unicode_bypass_fix_6.1-.patch" -O unicode.patch
+          patch -p1 --forward < unicode.patch || echo "::warning::Unicode bypass patch did not apply cleanly"
+          rm -f unicode.patch
+
+      - name: 🔧 Configure gki_defconfig
+        run: |
+          set -euo pipefail
+          cd kernel_workspace/common
+          D=arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU=y" >> $D
+
+          if [ "$ENABLE_SUSFS" = 'true' ]; then
+            # CONFIG_KSU_SUSFS also selects SUSFS inline hooks as the BakaSU hook method
+            cat >> $D <<'EOF'
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y
+          EOF
+          else
+            echo "CONFIG_KSU_TRACEPOINT_HOOK=y" >> $D
+          fi
+
+          echo "CONFIG_TMPFS_XATTR=y" >> $D
+          echo "CONFIG_TMPFS_POSIX_ACL=y" >> $D
+
+          if [ "$ENABLE_BBR_ECN" = 'true' ]; then
+            cat >> $D <<'EOF'
+          CONFIG_TCP_CONG_ADVANCED=y
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_NET_SCH_FQ=y
+          CONFIG_TCP_CONG_BIC=n
+          CONFIG_TCP_CONG_WESTWOOD=n
+          CONFIG_TCP_CONG_HTCP=n
+          CONFIG_IP_NF_TARGET_ECN=y
+          EOF
+          fi
+
+          if [ "$LTO_MODE" = 'thin' ]; then
+            sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' $D
+          fi
+
+          # Kernel name comes only from LOCALVERSION (see build step), no git/dirty suffix
+          echo "# CONFIG_LOCALVERSION_AUTO is not set" >> $D
+          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=""/' $D
+
+          # Strip leading spaces added by heredoc indentation
+          sed -i 's/^[[:space:]]\+CONFIG_/CONFIG_/' $D
+          tail -40 $D
+
+      - name: 📥 Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-5.10-${{ env.LTO_MODE }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-5.10-${{ env.LTO_MODE }}-
+
+      - name: 🔨 Build kernel
+        run: |
+          set -euo pipefail
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          clang --version | head -1
+          ld.lld --version
+          ccache -M "$CCACHE_MAXSIZE"
+          ccache -o compiler_check=none
+          ccache -z
+
+          cd kernel_workspace/common
+          export KBUILD_BUILD_TIMESTAMP="$KERNEL_TIME"
+          export KBUILD_BUILD_USER="$STOCK_BUILD_USER"
+          export KBUILD_BUILD_HOST="$STOCK_BUILD_HOST"
+          MAKE_ARGS=(LLVM=1 LLVM_IAS=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+                     CC="ccache clang" HOSTCC="ccache clang" HOSTCXX="ccache clang++"
+                     LD=ld.lld HOSTLD=ld.lld O=out
+                     LOCALVERSION="$KERNEL_SUFFIX" KCFLAGS=-Wno-error)
+
+          make "${MAKE_ARGS[@]}" gki_defconfig
+          echo "--- Effective KSU / SUSFS / LTO config ---"
+          grep -E "CONFIG_KSU|CONFIG_LTO_CLANG|CONFIG_CFI_CLANG=" out/.config || true
+
+          RELEASE="$(make -s "${MAKE_ARGS[@]}" kernelrelease)"
+          echo "Kernel release: $RELEASE"
+          echo "KERNEL_RELEASE=$RELEASE" >> "$GITHUB_ENV"
+
+          make -j"$(nproc --all)" "${MAKE_ARGS[@]}" Image
+          ccache -s
+
+          strings out/arch/arm64/boot/Image | grep -m1 "Linux version"
+
+      - name: 📦 Apply KPatch-Next (KPN)
+        if: ${{ env.KERNEL_MODULE_IMPL == 'KPN' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd kernel_workspace/common/out/arch/arm64/boot
+          gh release download --repo KernelSU-Next/KPatch-Next --pattern kptools-linux --pattern kpimg-linux
+          chmod +x kptools-linux
+          ./kptools-linux -p -i Image -k kpimg-linux -o oImage
+          mv oImage Image
+
+      - name: 📦 Prepare bundle (Image + AnyKernel3)
+        run: |
+          set -euo pipefail
+          BUNDLE="$GITHUB_WORKSPACE/upload_bundle"
+          mkdir -p "$BUNDLE"
+          IMG=kernel_workspace/common/out/arch/arm64/boot/Image
+          cp "$IMG" "$BUNDLE/kernel"
+
+          git clone -q --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
+          rm -rf ak3/.git ak3/.github ak3/README.md ak3/modules ak3/patch ak3/ramdisk
+          # Generic GKI installer: swap only the kernel in boot, keep the ramdisk untouched
+          printf '%s\n' \
+            '### AnyKernel3 Ramdisk Mod Script' \
+            'properties() { '"'"'' \
+            'kernel.string=GKI android12-5.10 BakaSU + SUSFS' \
+            'do.devicecheck=0' \
+            'do.modules=0' \
+            'do.systemless=0' \
+            'do.cleanup=1' \
+            'do.cleanuponabort=0' \
+            "'"'; } # end properties' \
+            '' \
+            'BLOCK=boot;' \
+            'IS_SLOT_DEVICE=auto;' \
+            'RAMDISK_COMPRESSION=auto;' \
+            'PATCH_VBMETA_FLAG=auto;' \
+            '' \
+            '. tools/ak3-core.sh;' \
+            '' \
+            'split_boot;' \
+            'flash_boot;' \
+            > ak3/anykernel.sh
+          cat ak3/anykernel.sh
+          cp "$IMG" ak3/Image
+          ZIP="AnyKernel3_${KSU_TYPE}_${KSUVER}_${KERNEL_RELEASE}.zip"
+          (cd ak3 && zip -qr9 "$BUNDLE/$ZIP" .)
+          echo "BUNDLE_NAME=${KSU_TYPE}_${KSUVER}_${KERNEL_RELEASE}" >> "$GITHUB_ENV"
+          ls -la "$BUNDLE"
+
+      - name: 📥 Download BakaSU manager APK
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BUNDLE="$GITHUB_WORKSPACE/upload_bundle"
+          find_run() {
+            gh api "repos/${KSU_REPO}/actions/runs?$1&status=success&per_page=50" \
+              --jq '[.workflow_runs[] | select(.name | ascii_downcase | contains("manager"))][0].id // empty'
+          }
+          RUN_ID="$(find_run "head_sha=${KSU_COMMIT_SHA}")"
+          if [ -z "$RUN_ID" ]; then
+            echo "::warning::No manager build for ${KSU_COMMIT_SHA}; using latest on main"
+            RUN_ID="$(find_run "branch=main")"
+          fi
+          [ -n "$RUN_ID" ] || { echo "::warning::No manager artifact found"; exit 0; }
+          gh run download "$RUN_ID" --repo "$KSU_REPO" --name Manager-release --dir manager
+          find manager -name '*.apk' -exec cp {} "$BUNDLE/" \;
+          ls -la "$BUNDLE"
+
+      - name: 📤 Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BUNDLE_NAME }}
+          path: upload_bundle/*
