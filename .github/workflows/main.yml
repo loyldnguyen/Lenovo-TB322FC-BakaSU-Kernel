@@ -554,33 +554,23 @@ jobs:
             echo "::warning::SUSFS patch left rejected hunks: $(echo "$REJECTS" | tr '\n' ' ')"
           fi
 
-      - name: 🔧 Enable SUSFS priority UID filter
+      - name: 🔧 Check SUSFS priority UID filter support
         if: ${{ env.ENABLE_SUSFS == 'true' }}
         run: |
           set -euo pipefail
           cd kernel_workspace
           SYM=KSU_SUSFS_PRIORITY_UID_FILTER
-          DEFCONFIG=./common/arch/arm64/configs/gki_defconfig
-          KCONFIG="$(readlink -f common/drivers/kernelsu)/Kconfig"
-
-          # BakaSU (sync-up) calls susfs_set_priority_uid_filter() and
-          # susfs_parse_priority_app_strings() unconditionally, while the SUSFS
-          # kernel side only defines them when CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER is on.
-          if ! grep -qs "CONFIG_${SYM}" common/fs/susfs.c common/include/linux/susfs.h; then
-            echo "::warning::SUSFS kernel patch has no CONFIG_${SYM} guard; nothing to enable."
-            exit 0
-          fi
-          if [ ! -f "$KCONFIG" ]; then
-            echo "::error::BakaSU Kconfig not found: $KCONFIG"
+          KSU_DIR="$(readlink -f common/drivers/kernelsu)"
+          # BakaSU sync-up >= dc8e01e (#652) defines this option in its own Kconfig
+          # (default y) and guards its call sites, so no Kconfig patch is needed.
+          if grep -qE "^[[:space:]]*config[[:space:]]+${SYM}([[:space:]]|$)" "$KSU_DIR/Kconfig"; then
+            echo "BakaSU Kconfig defines ${SYM}."
+          elif grep -rqs "susfs_set_priority_uid_filter\|susfs_parse_priority_app_strings" "$KSU_DIR"; then
+            echo "::error::This BakaSU ref calls the SUSFS priority UID filter but does not define ${SYM}; the kernel would fail to link. Use ksu_ref=sync-up (commit dc8e01e or newer)."
             exit 1
-          fi
-          if grep -qE "^[[:space:]]*(menu)?config[[:space:]]+${SYM}([[:space:]]|$)" "$KCONFIG"; then
-            echo "${SYM} is already defined in BakaSU Kconfig."
           else
-            printf '\nconfig %s\n\tbool "SUSFS priority UID filter"\n\tdepends on KSU_SUSFS\n\tdefault y\n' "$SYM" >> "$KCONFIG"
-            echo "Inserted ${SYM} into $KCONFIG"
+            echo "::notice::This BakaSU ref has no priority UID filter support; the feature will be absent."
           fi
-          echo "CONFIG_${SYM}=y" >> "$DEFCONFIG"
 
       - name: 🔧 Set gki_defconfig
         run: |
@@ -601,6 +591,7 @@ jobs:
               echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
               echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
               echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+              echo "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y"
             } >> "$DEFCONFIG"
           fi
 
