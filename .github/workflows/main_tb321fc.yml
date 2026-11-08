@@ -11,7 +11,7 @@ on:
       ksu_ref:
         description: "BakaSU branch"
         required: false
-        default: ''
+        default: 'sync-up'
 
       releases:
         description: "Kernel release"
@@ -502,6 +502,71 @@ jobs:
           echo "BakaSU version: $KSU_VERSION"
           echo "BakaSU commit: $KSU_COMMIT_SHA"
 
+      - name: 🔍 Check SUSFS priority UID filter support
+        if: ${{ env.ENABLE_SUSFS == 'true' }}
+        run: |
+          # Read-only: inspects the BakaSU checkout and never modifies it.
+          set -euo pipefail
+          cd kernel_workspace/KernelSU
+
+          # BakaSU history around KSU_SUSFS_PRIORITY_UID_FILTER:
+          #   FIRST_BROKEN  first commit that calls the two priority-UID-filter functions
+          #                 without declaring the symbol (inclusive)
+          #   FIRST_FIXED   first commit where BakaSU defines the symbol itself
+          # A ref in [FIRST_BROKEN, FIRST_FIXED) compiles fine and then fails at the link
+          # step, so stop here instead of after the full compile.
+          FIRST_BROKEN="67b5645"
+          FIRST_FIXED="dc8e01e"
+          SYMBOL="KSU_SUSFS_PRIORITY_UID_FILTER"
+
+          HEAD_SHORT="$(git rev-parse --short=8 HEAD)"
+          echo "BakaSU checkout: ${HEAD_SHORT}"
+
+          has_commit() { git cat-file -e "$1^{commit}" 2>/dev/null; }
+          # True when $1 is HEAD itself or one of its ancestors.
+          in_history() { git merge-base --is-ancestor "$1" HEAD 2>/dev/null; }
+
+          # Where does this ref define the symbol?
+          IN_KCONFIG=false
+          IN_KBUILD=false
+          if [ -f kernel/Kconfig ] && grep -Eq '^[[:space:]]*config[[:space:]]+'"$SYMBOL"'([[:space:]]|$)' kernel/Kconfig; then
+            IN_KCONFIG=true
+          fi
+          if grep -qs "$SYMBOL" kernel/Kbuild kernel/Makefile; then
+            IN_KBUILD=true
+          fi
+
+          # Where does this ref sit relative to the broken range?
+          RANGE_CHECKED=false
+          IN_BROKEN_RANGE=false
+          if [ "$(git rev-parse --is-shallow-repository)" != true ] && has_commit "$FIRST_BROKEN" && has_commit "$FIRST_FIXED"; then
+            RANGE_CHECKED=true
+            if in_history "$FIRST_BROKEN" && ! in_history "$FIRST_FIXED"; then
+              IN_BROKEN_RANGE=true
+            fi
+          fi
+
+          if [ "$IN_KCONFIG" = true ]; then
+            echo "OK: BakaSU ${HEAD_SHORT} defines ${SYMBOL} in kernel/Kconfig:"
+            awk -v sym="$SYMBOL" '
+              $1 == "config" && $2 == sym { found = 1; print; next }
+              found && /^[^ \t]/ { exit }
+              found { print }
+            ' kernel/Kconfig
+          elif [ "$IN_KBUILD" = true ]; then
+            echo "::warning::${SYMBOL} is set in kernel/Kbuild or kernel/Makefile but not declared in kernel/Kconfig, so it is a build-time define. The CONFIG_${SYMBOL} line in gki_defconfig has no effect on this ref."
+            grep -ns "$SYMBOL" kernel/Kbuild kernel/Makefile || true
+          elif [ "$IN_BROKEN_RANGE" = true ]; then
+            echo "::error title=BakaSU ref is in the broken range::BakaSU ${HEAD_SHORT} is between ${FIRST_BROKEN} and ${FIRST_FIXED}: it calls the two SUSFS priority-UID-filter functions but does not declare ${SYMBOL}, so the kernel would compile and then fail at the link step. Use ${FIRST_FIXED} or newer (for example ksu_ref=sync-up), or a ref older than ${FIRST_BROKEN}."
+            exit 1
+          elif [ "$RANGE_CHECKED" != true ]; then
+            echo "::warning::${SYMBOL} is not defined in this BakaSU ref and its position relative to ${FIRST_BROKEN}/${FIRST_FIXED} could not be determined (shallow clone or commits not found). If the build fails at the link step, this ref is probably in the broken range."
+          elif in_history "$FIRST_FIXED"; then
+            echo "::warning::BakaSU ${HEAD_SHORT} is newer than ${FIRST_FIXED} but no longer defines ${SYMBOL} (renamed or removed upstream?). The CONFIG_${SYMBOL} line in gki_defconfig will be ignored."
+          else
+            echo "::notice::BakaSU ${HEAD_SHORT} predates the SUSFS priority UID filter, so ${SYMBOL} is not available. The CONFIG_${SYMBOL} line in gki_defconfig will be ignored (Kconfig warns about the unknown symbol and the build continues)."
+          fi
+
       - name: 🔧 Set up SUSFS
         if: ${{ env.ENABLE_SUSFS == 'true' }}
         run: |
@@ -551,7 +616,10 @@ jobs:
           echo "CONFIG_KSU=y" >> "$DEFCONFIG"
 
           if [ "${{ env.ENABLE_SUSFS }}" = 'true' ]; then
-            # Only the SUSFS options that BakaSU's kernel/Kconfig defines
+            # Only the SUSFS options that BakaSU's kernel/Kconfig defines.
+            # PRIORITY_UID_FILTER is defined by BakaSU itself from dc8e01e on; the line only
+            # states the intent (redundant if Kconfig already defaults it to y). The
+            # "Check SUSFS priority UID filter support" step above reports whether the ref has it.
             {
               echo "CONFIG_KSU_SUSFS=y"
               echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
@@ -563,6 +631,7 @@ jobs:
               echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
               echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
               echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+              echo "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y"
             } >> "$DEFCONFIG"
           fi
 
