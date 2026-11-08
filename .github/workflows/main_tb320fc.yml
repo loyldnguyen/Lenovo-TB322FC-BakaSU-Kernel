@@ -1,4 +1,4 @@
-name: Build Lenovo TB320FC BakaSU Kernel
+name: Build GKI android12-5.10 BakaSU + SUSFS
 run-name: ${{ inputs.kernel_suffix }} (BakaSU ${{ inputs.ksu_ref }})
 
 permissions:
@@ -9,27 +9,27 @@ on:
   workflow_dispatch:
     inputs:
       ksu_ref:
-        description: "BakaSU"
+        description: "BakaSU branch / tag / commit"
         required: false
         default: 'sync-up'
 
       susfs_ref:
-        description: "SUSFS branch"
+        description: "SUSFS branch / commit (gitlab simonpunk/susfs4ksu)"
         required: false
         default: 'gki-android12-5.10'
 
       kernel_commit:
-        description: "kernel commit"
+        description: "kernel/common commit (default = deprecated/android12-5.10-2025-02)"
         required: false
         default: '6aaee44d50609be8d40c91ffffd0c24741d8c924'
 
       kernel_suffix:
-        description: "Kernel suffix"
+        description: "Kernel suffix (after 5.10.xxx)"
         required: false
         default: '-android12-9-g6aaee44d5060'
 
       kernel_time:
-        description: "Build timestamp"
+        description: "Build timestamp (uname -v)"
         required: false
         default: 'Sun Dec 01 08:10:00 UTC 2024'
 
@@ -103,6 +103,18 @@ jobs:
             bc bison flex cpio libssl-dev libelf-dev ccache zip unzip python-is-python3 aria2
           wait
           df -h /
+
+      - name: 💾 Add swap (full LTO link needs > 16 GB RAM)
+        run: |
+          set -euo pipefail
+          SWAP_GB=$([ "$LTO_MODE" = 'full' ] && echo 24 || echo 8)
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile /swapfile
+          sudo fallocate -l "${SWAP_GB}G" /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile >/dev/null
+          sudo swapon /swapfile
+          free -h
 
       - name: 📥 Restore clang cache
         id: clang-cache
