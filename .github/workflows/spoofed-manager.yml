@@ -2,15 +2,29 @@ name: Build BakaSU Spoofed Manager (arm64)
 
 # Builds the BakaSU manager app from source with a CUSTOM package name so that
 # root detectors (e.g. Duck Detector) no longer match the default string
-# "com.resukisu.resukisu". Only the Kotlin/Java app is rebuilt; the proven
-# ksud native daemon (libksud.so) is reused from an existing official APK,
-# so no Rust / LKM / ksuinit build chain is needed. arm64-v8a only.
+# "com.resukisu.resukisu".
+#
+# Trust model: DYNAMIC MANAGER (runtime). The kernel is NOT rebuilt. Instead, a
+# FIXED signing key is used; its certificate (size + sha256) is printed so you
+# can register it on-device with:
+#     ksud kernel dynamic-manager set-apk <apk>
+# run from a root shell granted by the official BakaSU manager.
+#
+# Only the Kotlin/Java app is rebuilt; the proven ksud native daemon
+# (libksud.so) is reused from an existing official APK, so no Rust / LKM /
+# ksuinit build chain is needed. arm64-v8a only.
+#
+# Secrets (set these after the first run so the signature stays STABLE):
+#   KEYSTORE           base64 of the PKCS12 key.jks (alias: spoofkey)
+#   KEYSTORE_PASSWORD  the keystore/key password
+# If the secrets are absent, the workflow generates a key once and uploads it
+# as the "SAVE-THESE-SECRETS" artifact for you to store, then delete.
 
 on:
   workflow_dispatch:
     inputs:
       ksu_commit:
-        description: "BakaSU commit to build (must match the commit your kernel was built from)"
+        description: "BakaSU commit to build (should match the commit your kernel was built from)"
         required: true
         default: "63ad1ea3a90455dee9d77163cdafb028d8a90416"
       package_name:
@@ -29,6 +43,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Fixed key material. KEY_PASSWORD == KEYSTORE_PASSWORD because PKCS12
+      # uses a single password.
+      KEY_ALIAS: spoofkey
     steps:
       - name: Checkout BakaSU at pinned commit
         uses: actions/checkout@v7
@@ -53,9 +71,45 @@ jobs:
           esac
           echo "PKG=$PKG" >> "$GITHUB_OUTPUT"
           echo "SHA=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          PASS="$(openssl rand -hex 24)"
+
+      - name: Resolve FIXED signing keystore
+        id: keystore
+        env:
+          SECRET_KEYSTORE: ${{ secrets.KEYSTORE }}
+          SECRET_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p manager
+          if [ -n "${SECRET_KEYSTORE:-}" ] && [ -n "${SECRET_KEYSTORE_PASSWORD:-}" ]; then
+            echo "Using keystore from repository secrets (stable signature)."
+            printf '%s' "$SECRET_KEYSTORE" | base64 -d > manager/key.jks
+            PASS="$SECRET_KEYSTORE_PASSWORD"
+            echo "GENERATED=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No KEYSTORE secret found — generating a NEW fixed key. Save it as a secret (see SAVE-THESE-SECRETS artifact) and re-run, or the signature will change next time."
+            PASS="$(openssl rand -hex 24)"
+            keytool -genkeypair -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$PASS" -keypass "$PASS" \
+              -dname "CN=BakaSU Manager" -storetype PKCS12 -keystore manager/key.jks
+            echo "GENERATED=true" >> "$GITHUB_OUTPUT"
+          fi
           echo "::add-mask::$PASS"
           echo "PASS=$PASS" >> "$GITHUB_OUTPUT"
+
+      - name: Compute manager signature (size + hash) for dynamic manager
+        id: sign
+        run: |
+          set -euo pipefail
+          keytool -exportcert -alias "$KEY_ALIAS" -keystore manager/key.jks \
+            -storepass "${{ steps.keystore.outputs.PASS }}" -file cert.der
+          SIZE_DEC="$(stat -c%s cert.der)"
+          SIZE_HEX="$(printf '0x%04x' "$SIZE_DEC")"
+          HASH="$(sha256sum cert.der | awk '{print $1}')"
+          echo "SIZE_DEC=$SIZE_DEC" >> "$GITHUB_OUTPUT"
+          echo "SIZE_HEX=$SIZE_HEX" >> "$GITHUB_OUTPUT"
+          echo "HASH=$HASH" >> "$GITHUB_OUTPUT"
+          echo "Certificate size: $SIZE_HEX ($SIZE_DEC bytes)"
+          echo "Certificate hash: $HASH"
 
       - name: Fetch reference APK and extract libksud.so (arm64)
         run: |
@@ -78,24 +132,24 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Install Android NDK, build-tools and CMake
-        run: |
-          set -euo pipefail
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "ndk;30.0.16248370" "build-tools;36.1.0" "cmake;3.22.1" "platforms;android-37" >/dev/null
+      # Let AGP download the exact SDK platform (android-37), build-tools, NDK
+      # and CMake it needs — the same way BakaSU's own build-manager.yml does.
+      # (The previous manual `sdkmanager ... platforms;android-37` step failed
+      # because the pre-installed sdkmanager could not resolve android-37.)
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
 
-      - name: Generate signing keystore
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+
+      - name: Inject signing config into gradle.properties
         run: |
           set -euo pipefail
-          keytool -genkeypair -alias spoofkey -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass "${{ steps.params.outputs.PASS }}" -keypass "${{ steps.params.outputs.PASS }}" \
-            -dname "CN=BakaSU Manager" -storetype PKCS12 -keystore manager/key.jks
           {
             echo "KEYSTORE_FILE=key.jks"
-            echo "KEYSTORE_PASSWORD=${{ steps.params.outputs.PASS }}"
-            echo "KEY_ALIAS=spoofkey"
-            echo "KEY_PASSWORD=${{ steps.params.outputs.PASS }}"
+            echo "KEYSTORE_PASSWORD=${{ steps.keystore.outputs.PASS }}"
+            echo "KEY_ALIAS=$KEY_ALIAS"
+            echo "KEY_PASSWORD=${{ steps.keystore.outputs.PASS }}"
           } >> manager/gradle.properties
 
       - name: Build spoofed manager APK
@@ -117,27 +171,105 @@ jobs:
           echo "Remaining APKs:"; ls -l "$OUT"
           test -n "$(find "$OUT" -maxdepth 1 -type f -name '*arm64-v8a*.apk')"
 
-      - name: Repack with libksud.so and resign
+      - name: Repack with libksud.so and resign (fixed key)
         run: |
           set -euo pipefail
           python3 repack_apk_multi.py repack \
             -b release -t release -a arm64-v8a \
-            -K manager/key.jks -A spoofkey \
-            -P "${{ steps.params.outputs.PASS }}" -S "${{ steps.params.outputs.PASS }}" \
+            -K manager/key.jks -A "$KEY_ALIAS" \
+            -P "${{ steps.keystore.outputs.PASS }}" -S "${{ steps.keystore.outputs.PASS }}" \
             --strip
           echo "Built APK(s):"; ls -l dist/
+
+      - name: Write dynamic-manager instructions
+        run: |
+          set -euo pipefail
+          APK="$(find dist -maxdepth 1 -type f -name '*.apk' | head -1)"
+          APK_NAME="$(basename "$APK")"
+          cat > dist/DYNAMIC-SIGN-README.txt <<EOF
+          BakaSU spoofed manager — dynamic manager registration
+          ======================================================
+          Package name : ${{ steps.params.outputs.PKG }}
+          App label    : ${{ inputs.app_label }}
+          APK          : $APK_NAME
+          Signature size : ${{ steps.sign.outputs.SIZE_HEX }} (${{ steps.sign.outputs.SIZE_DEC }} bytes)
+          Signature hash : ${{ steps.sign.outputs.HASH }}
+
+          HOW TO MAKE THE KERNEL TRUST THIS MANAGER (no kernel reflash):
+          1. Keep the OFFICIAL BakaSU manager installed and working (it is
+             already trusted by the kernel and grants you root).
+          2. Copy $APK_NAME to the phone and install it too.
+          3. Open a ROOT shell (granted by the official manager) and run ONE of:
+
+               # easiest — reads size+hash straight from the APK:
+               ksud kernel dynamic-manager set-apk /sdcard/$APK_NAME
+
+               # or set them manually (decimal size):
+               ksud kernel dynamic-manager set ${{ steps.sign.outputs.SIZE_DEC }} ${{ steps.sign.outputs.HASH }}
+
+          4. Verify:
+               ksud kernel dynamic-manager get
+          5. Open the spoofed manager — it should now have root. You can then
+             uninstall the official manager if you want.
+
+          Notes:
+          - The signature stays the same ONLY if you reuse the same keystore.
+            Store it as repository secrets KEYSTORE + KEYSTORE_PASSWORD so every
+            future build matches what you registered on-device.
+          - If the dynamic manager is lost after a reboot, re-run step 3.
+          EOF
+          cat dist/DYNAMIC-SIGN-README.txt
+
+      - name: Package keystore for saving (only when newly generated)
+        if: ${{ steps.keystore.outputs.GENERATED == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p _secrets
+          base64 -w0 manager/key.jks > _secrets/KEYSTORE.base64.txt
+          printf '%s\n' "${{ steps.keystore.outputs.PASS }}" > _secrets/KEYSTORE_PASSWORD.txt
+          cat > _secrets/README.txt <<'EOF'
+          A NEW signing key was generated for this build.
+          To keep the manager signature STABLE across future builds:
+            1. Repo Settings -> Secrets and variables -> Actions -> New secret
+            2. KEYSTORE          = contents of KEYSTORE.base64.txt
+               KEYSTORE_PASSWORD = contents of KEYSTORE_PASSWORD.txt
+            3. DELETE this artifact afterwards — it contains your PRIVATE key.
+          Until you do this, every run produces a different signature and you
+          must re-register it on-device with dynamic-manager.
+          EOF
+
+      - name: Upload keystore secrets (only when newly generated)
+        if: ${{ steps.keystore.outputs.GENERATED == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: SAVE-THESE-SECRETS
+          path: _secrets/*
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Upload spoofed manager APK
         uses: actions/upload-artifact@v7
         with:
           name: BakaSU-spoofed-manager-arm64
-          path: dist/*.apk
+          path: |
+            dist/*.apk
+            dist/DYNAMIC-SIGN-README.txt
           if-no-files-found: error
 
       - name: Summary
         run: |
-          echo "### Spoofed BakaSU manager built" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Package name: \`${{ steps.params.outputs.PKG }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- App label: ${{ inputs.app_label }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- BakaSU commit: ${{ steps.params.outputs.SHA }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- arm64-v8a only; libksud.so reused from the reference APK." >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Spoofed BakaSU manager built"
+            echo "- Package name: \`${{ steps.params.outputs.PKG }}\`"
+            echo "- App label: ${{ inputs.app_label }}"
+            echo "- BakaSU commit: ${{ steps.params.outputs.SHA }}"
+            echo "- Signature size: \`${{ steps.sign.outputs.SIZE_HEX }}\` (${{ steps.sign.outputs.SIZE_DEC }} bytes)"
+            echo "- Signature hash: \`${{ steps.sign.outputs.HASH }}\`"
+            echo "- Register on-device: \`ksud kernel dynamic-manager set-apk <apk>\`"
+            if [ "${{ steps.keystore.outputs.GENERATED }}" = "true" ]; then
+              echo "- ⚠️ New key generated — save the **SAVE-THESE-SECRETS** artifact as secrets, then delete it."
+            else
+              echo "- Key source: repository secret (stable signature)."
+            fi
+            echo "- arm64-v8a only; libksud.so reused from the reference APK."
+          } >> "$GITHUB_STEP_SUMMARY"
