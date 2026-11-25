@@ -73,6 +73,26 @@ on:
         default: true
         type: boolean
 
+      manager_package_name:
+        description: "Custom manager package name (empty = accept any package)"
+        required: false
+        default: ''
+
+      manager_apk_url:
+        description: "Custom manager APK URL (auto-read signature + bundle it)"
+        required: false
+        default: ''
+
+      manager_sign_size:
+        description: "Custom manager signature size (e.g. 0x377), if no APK URL"
+        required: false
+        default: '0x02cb'
+
+      manager_sign_hash:
+        description: "Custom manager signature SHA-256, if no APK URL"
+        required: false
+        default: 'f67905ad7dc13109eda756db93ed67309ba44b7cb19856e89b9351a5c299dcd0'
+
 jobs:
   build:
     name: Build TB322FC ${{ inputs.releases }}
@@ -96,6 +116,10 @@ jobs:
       ENABLE_UNICODE_BYPASS: ${{ inputs.enable_unicode_bypass }}
       ENABLE_SUSFS: ${{ inputs.enable_susfs }}
       USB_POLL_1MS: ${{ inputs.usb_poll_1ms }}
+      MANAGER_PACKAGE_INPUT: ${{ inputs.manager_package_name }}
+      MANAGER_APK_URL_INPUT: ${{ inputs.manager_apk_url }}
+      MANAGER_SIGN_SIZE_INPUT: ${{ inputs.manager_sign_size }}
+      MANAGER_SIGN_HASH_INPUT: ${{ inputs.manager_sign_hash }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -551,6 +575,149 @@ jobs:
           echo "BakaSU version: $KSU_VERSION"
           echo "BakaSU commit: $KSU_COMMIT_SHA"
 
+      - name: 🔑 Configure custom manager (package name / signature)
+        run: |
+          set -euo pipefail
+          cd kernel_workspace
+
+          PKG="$(printf '%s' "$MANAGER_PACKAGE_INPUT" | tr -d '[:space:]')"
+          APK_URL="$(printf '%s' "$MANAGER_APK_URL_INPUT" | tr -d '[:space:]')"
+          SIGN_SIZE="$(printf '%s' "$MANAGER_SIGN_SIZE_INPUT" | tr -d '[:space:]')"
+          SIGN_HASH="$(printf '%s' "$MANAGER_SIGN_HASH_INPUT" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+          KSU_KBUILD="$(readlink -f common/drivers/kernelsu)/Kbuild"
+
+          if [ -z "$PKG$APK_URL$SIGN_SIZE$SIGN_HASH" ]; then
+            echo "No custom manager requested. Using BakaSU's built-in manager signatures."
+            exit 0
+          fi
+
+          # 1) Read the signing certificate from the APK (same logic as kernel/manager/apk_sign.c)
+          if [ -n "$APK_URL" ]; then
+            if [ -n "$SIGN_SIZE$SIGN_HASH" ]; then
+              echo "::notice::manager_apk_url is set; manager_sign_size/hash inputs are ignored."
+            fi
+            curl -fLSs --retry 3 "$APK_URL" -o custom_manager.apk
+            # Command substitution (not < <(...)) so a parser failure stops the step under set -e
+            SIGN_INFO="$(python3 -I - custom_manager.apk <<'PY'
+          import hashlib, struct, sys, zipfile
+
+          def fail(msg):
+              print(f"::error::{msg}", file=sys.stderr)
+              sys.exit(1)
+
+          path = sys.argv[1]
+          data = open(path, "rb").read()
+          eocd = data.rfind(b"PK\x05\x06")
+          if eocd < 0:
+              fail("Not a valid APK/ZIP (EOCD not found)")
+          cd_offset = struct.unpack_from("<I", data, eocd + 16)[0]
+          if data[cd_offset - 16:cd_offset] != b"APK Sig Block 42":
+              fail("APK has no APK Signing Block. Sign it with the v2 scheme.")
+          block_size = struct.unpack_from("<Q", data, cd_offset - 24)[0]
+          pos = cd_offset - block_size - 8
+          if struct.unpack_from("<Q", data, pos)[0] != block_size:
+              fail("Corrupted APK Signing Block")
+          pos += 8
+          end = cd_offset - 24
+          v2 = []
+          while pos < end:
+              pair_len = struct.unpack_from("<Q", data, pos)[0]
+              pair_id = struct.unpack_from("<I", data, pos + 8)[0]
+              value = data[pos + 12:pos + 8 + pair_len]
+              if pair_id == 0x7109871A:
+                  v2.append(value)
+              elif pair_id != 0x42726577:  # verity padding
+                  fail(f"Unexpected signing block 0x{pair_id:08x}: BakaSU only accepts v2-only APKs (disable v1/v3/v4 signing)")
+              pos += 8 + pair_len
+          if len(v2) != 1:
+              fail(f"Expected exactly one v2 signature block, found {len(v2)}")
+          with zipfile.ZipFile(path) as z:
+              if "META-INF/MANIFEST.MF" in z.namelist():
+                  fail("APK contains META-INF/MANIFEST.MF (v1 signature); BakaSU rejects it. Disable v1 signing.")
+
+          def lp(buf, off):
+              n = struct.unpack_from("<I", buf, off)[0]
+              return buf[off + 4:off + 4 + n], off + 4 + n
+
+          signers, _ = lp(v2[0], 0)
+          signer, _ = lp(signers, 0)
+          signed_data, _ = lp(signer, 0)
+          _, off = lp(signed_data, 0)        # digests
+          certs, _ = lp(signed_data, off)    # certificates
+          cert, _ = lp(certs, 0)             # first certificate
+          if len(cert) > 1024:
+              fail(f"Certificate is {len(cert)} bytes; BakaSU accepts at most 1024")
+          print(hex(len(cert)), hashlib.sha256(cert).hexdigest())
+          PY
+            )"
+            read -r SIGN_SIZE SIGN_HASH <<< "$SIGN_INFO"
+            echo "Signature read from APK: size=$SIGN_SIZE hash=$SIGN_HASH"
+
+            # Cross-check the package name when aapt2 from the runner's Android SDK is available
+            AAPT2="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/build-tools/*/aapt2 2>/dev/null | sort -V | tail -n 1 || true)"
+            if [ -n "$AAPT2" ]; then
+              APK_PKG="$("$AAPT2" dump packagename custom_manager.apk 2>/dev/null | tr -d '[:space:]' || true)"
+              echo "APK package name: ${APK_PKG:-unknown}"
+              if [ -n "$PKG" ] && [ -n "$APK_PKG" ] && [ "$PKG" != "$APK_PKG" ]; then
+                echo "::error::manager_package_name '$PKG' does not match the APK package '$APK_PKG'"
+                exit 1
+              fi
+            fi
+          fi
+
+          # 2) Validate inputs
+          if [ -n "$SIGN_SIZE$SIGN_HASH" ]; then
+            if [ -z "$SIGN_SIZE" ] || [ -z "$SIGN_HASH" ]; then
+              echo "::error::manager_sign_size and manager_sign_hash must be set together"
+              exit 1
+            fi
+            if ! printf '%s' "$SIGN_SIZE" | grep -qE '^(0[xX][0-9a-fA-F]+|[1-9][0-9]*)$'; then
+              echo "::error::manager_sign_size must be decimal or hex like 0x377 (got '$SIGN_SIZE')"
+              exit 1
+            fi
+            if [ $((SIGN_SIZE)) -gt 1024 ]; then
+              echo "::error::manager_sign_size $SIGN_SIZE exceeds BakaSU's 1024-byte certificate limit"
+              exit 1
+            fi
+            if ! printf '%s' "$SIGN_HASH" | grep -qE '^[0-9a-f]{64}$'; then
+              echo "::error::manager_sign_hash must be a 64-character SHA-256 hex string"
+              exit 1
+            fi
+            if ! grep -q 'KSU_EXPECTED_SIZE' "$KSU_KBUILD"; then
+              echo "::error::This BakaSU ref does not support KSU_EXPECTED_SIZE/KSU_EXPECTED_HASH"
+              exit 1
+            fi
+            {
+              echo "KSU_EXPECTED_SIZE=$SIGN_SIZE"
+              echo "KSU_EXPECTED_HASH=$SIGN_HASH"
+              echo "CUSTOM_MANAGER_SIGN=true"
+            } >> "$GITHUB_ENV"
+            echo "Custom manager signature: size=$SIGN_SIZE hash=$SIGN_HASH"
+          else
+            echo "::notice::No custom signature given. The manager must still be signed with a built-in BakaSU/KernelSU key."
+          fi
+
+          if [ -n "$PKG" ]; then
+            if ! printf '%s' "$PKG" | grep -qE '^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$'; then
+              echo "::error::Invalid Android package name: '$PKG'"
+              exit 1
+            fi
+            if [ "${#PKG}" -ge 256 ]; then
+              echo "::error::Package name is too long"
+              exit 1
+            fi
+            if ! grep -q 'KSU_MANAGER_PACKAGE' "$KSU_KBUILD"; then
+              echo "::error::This BakaSU ref does not support KSU_MANAGER_PACKAGE"
+              exit 1
+            fi
+            echo "KSU_MANAGER_PACKAGE=$PKG" >> "$GITHUB_ENV"
+            echo "Kernel will only accept the manager package: $PKG"
+          fi
+
+          if [ -f custom_manager.apk ]; then
+            echo "CUSTOM_MANAGER_APK=$PWD/custom_manager.apk" >> "$GITHUB_ENV"
+          fi
+
       - name: 🔧 Set up SUSFS
         if: ${{ env.ENABLE_SUSFS == 'true' }}
         run: |
@@ -607,6 +774,10 @@ jobs:
           cd kernel_workspace
           DEFCONFIG=./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU=y" >> "$DEFCONFIG"
+          if [ "${CUSTOM_MANAGER_SIGN:-false}" = 'true' ]; then
+            # The custom signature slot (KSU_EXPECTED_SIZE/HASH) is only compiled in with this option
+            echo "CONFIG_KSU_MULTI_MANAGER_SUPPORT=y" >> "$DEFCONFIG"
+          fi
 
           if [ "${{ env.ENABLE_SUSFS }}" = 'true' ]; then
             # Only the SUSFS options that BakaSU's kernel/Kconfig defines
@@ -806,6 +977,17 @@ jobs:
           echo "--- Post-build environment file timestamp: ---"
           LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
           echo "Kernel build completed!"
+
+          # Confirm the custom manager settings really ended up in the kernel image
+          IMG=out/arch/arm64/boot/Image
+          if [ -n "${KSU_EXPECTED_HASH:-}" ]; then
+            grep -qaF "$KSU_EXPECTED_HASH" "$IMG" || { echo "::error::Custom manager hash not found in Image"; exit 1; }
+            echo "Verified: custom manager signature is in the Image."
+          fi
+          if [ -n "${KSU_MANAGER_PACKAGE:-}" ]; then
+            grep -qaF "$KSU_MANAGER_PACKAGE" "$IMG" || { echo "::error::Manager package name not found in Image"; exit 1; }
+            echo "Verified: manager package '$KSU_MANAGER_PACKAGE' is in the Image."
+          fi
           echo "ccache status:"
           ccache -s
           echo "Disk space after build:"
@@ -925,6 +1107,16 @@ jobs:
           set -euo pipefail
 
           BUNDLE_DIR="${GITHUB_WORKSPACE}/kernel_workspace/upload_bundle"
+
+          if [ -n "${CUSTOM_MANAGER_APK:-}" ]; then
+            cp "$CUSTOM_MANAGER_APK" "$BUNDLE_DIR/Manager-custom.apk"
+            echo "Bundled the custom manager APK instead of the official BakaSU manager."
+            exit 0
+          fi
+          if [ -n "${KSU_MANAGER_PACKAGE:-}" ] && [ "$KSU_MANAGER_PACKAGE" != "com.resukisu.resukisu" ]; then
+            echo "::notice::Kernel is locked to '$KSU_MANAGER_PACKAGE'; the official manager below will NOT be accepted. Install your own build."
+          fi
+
           REPO="${KSU_REPO}"
           # Follow the BakaSU ref the kernel was built from. Branches other than main
           # produce the BakaSU-DEV manager (com.resukisu.resukisu.dev).
