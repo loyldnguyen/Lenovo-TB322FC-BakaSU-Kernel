@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       ksu_ref:
-        description: "SukiSU Nova branch/tag/commit (empty = builtin; main/dev have no in-kernel SUSFS)"
+        description: "SukiSU Nova branch/tag/commit (empty = builtin with SUSFS, main without SUSFS)"
         required: false
         default: ''
 
@@ -35,11 +35,12 @@ on:
         default: ''
 
       kernel_module_impl:
-        description: "Kernel module implementation"
+        description: "Kernel module implementation (KPM = SukiSU Nova KPM, KPN = KPatch-Next)"
         required: true
         type: choice
         options:
           - 'N/A'
+          - 'KPM'
           - 'KPN'
         default: 'N/A'
 
@@ -569,7 +570,16 @@ jobs:
           set -euo pipefail
           cd kernel_workspace
           KSU_SETUP_REF="$(printf '%s' "${KSU_REF_INPUT:-}" | tr -d '[:space:]')"
-          KSU_SETUP_REF="${KSU_SETUP_REF:-$KSU_DEFAULT_REF}"
+          if [ -z "$KSU_SETUP_REF" ]; then
+            # builtin has no kprobes: its sucompat/execve/reboot hooks come from the SUSFS patch.
+            # Without SUSFS, use main, which hooks via kprobes/tracepoints on GKI.
+            if [ "$ENABLE_SUSFS" = 'true' ]; then
+              KSU_SETUP_REF="$KSU_DEFAULT_REF"
+            else
+              KSU_SETUP_REF=main
+              echo "::notice::SUSFS is off, so SukiSU Nova 'main' (kprobe hooks) is used instead of 'builtin'."
+            fi
+          fi
 
           # The upstream setup.sh clones from git.zako.shirkneko.top without a timeout and can
           # hang on GitHub runners, so do the same steps here with a timeout and a GitHub fallback.
@@ -611,6 +621,17 @@ jobs:
             KSU_BUILD_FILE="$PWD/KernelSU/kernel/Kbuild"
           else
             KSU_BUILD_FILE="$PWD/KernelSU/kernel/Makefile"
+          fi
+
+          # The build file queries the release API (git.zako / api.github.com) with plain
+          # `curl -s` while make parses it; give it timeouts so an unreachable host cannot stall the build.
+          sed -i -E 's|^(CURL_BIN[[:space:]]*:=.*curl)[[:space:]]*$|\1 --connect-timeout 10 --max-time 30|' "$KSU_BUILD_FILE"
+          grep -n '^CURL_BIN' "$KSU_BUILD_FILE" || true
+
+          # builtin has no kprobe hooks; without the SUSFS patch nothing would call into KernelSU
+          if [ "$ENABLE_SUSFS" != 'true' ] && ! grep -qE '^[[:space:]]*depends on KPROBES' KernelSU/kernel/Kconfig; then
+            echo "::error::SukiSU Nova ref '$KSU_SETUP_REF' uses manual hooks that only the SUSFS patch adds. Enable SUSFS, or use ksu_ref=main."
+            exit 1
           fi
 
           {
@@ -735,8 +756,12 @@ jobs:
               # the official SukiSU Nova / KernelSU keys stay accepted.
               sed -i "/apk_sign_keys\[\] = {/a\\    { $SIGN_SIZE, \"$SIGN_HASH\" }, // custom manager (CI)" "$KSU_APK_SIGN_C"
               grep -n "custom manager (CI)" "$KSU_APK_SIGN_C"
+            elif grep -qF 'return check_v2_signature(path, EXPECTED_SIZE, EXPECTED_HASH);' "$KSU_APK_SIGN_C" 2>/dev/null; then
+              # main/dev: one built-in slot (EXPECTED_SIZE/HASH). Accept our key as well,
+              # so the official SukiSU Nova manager keeps working.
+              sed -i "s|return check_v2_signature(path, EXPECTED_SIZE, EXPECTED_HASH);|return check_v2_signature(path, EXPECTED_SIZE, EXPECTED_HASH) \|\| check_v2_signature(path, $SIGN_SIZE, \"$SIGN_HASH\"); /* custom manager (CI) */|" "$KSU_APK_SIGN_C"
+              grep -n "custom manager (CI)" "$KSU_APK_SIGN_C"
             elif grep -qE '^KSU_EXPECTED_SIZE[[:space:]]*\?=' "$KSU_KBUILD"; then
-              # main/dev: one signature slot that REPLACES the official SukiSU Nova key
               {
                 echo "KSU_EXPECTED_SIZE=$SIGN_SIZE"
                 echo "KSU_EXPECTED_HASH=$SIGN_HASH"
@@ -839,6 +864,15 @@ jobs:
           cd kernel_workspace
           DEFCONFIG=./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU=y" >> "$DEFCONFIG"
+          if grep -qE '^[[:space:]]*depends on KPROBES' ./common/drivers/kernelsu/Kconfig; then
+            # main/dev hook through kprobes/kretprobes and syscall tracepoints
+            echo "CONFIG_KPROBES=y" >> "$DEFCONFIG"
+            echo "CONFIG_KRETPROBES=y" >> "$DEFCONFIG"
+          fi
+          if [ "$KERNEL_MODULE_IMPL" = 'KPM' ]; then
+            # SukiSU Nova KPM bridge (selects KALLSYMS/KALLSYMS_ALL); KernelPatch is injected after the build
+            echo "CONFIG_KPM=y" >> "$DEFCONFIG"
+          fi
 
           if [ "${{ env.ENABLE_SUSFS }}" = 'true' ]; then
             # SUSFS options defined by SukiSU Nova's builtin kernel/Kconfig
@@ -1116,6 +1150,27 @@ jobs:
             }
 
             core.info(`Old cache cleanup completed. Deleted ${deleted} caches.`);
+
+      - name: 📦 Apply SukiSU Nova KPM (KernelPatch)
+        if: ${{ env.KERNEL_MODULE_IMPL == 'KPM' }}
+        run: |
+          set -euo pipefail
+          IMG_DIR="$GITHUB_WORKSPACE/kernel_workspace/common/out/arch/arm64/boot"
+          grep -qx 'CONFIG_KPM=y' "$GITHUB_WORKSPACE/kernel_workspace/common/out/.config" || {
+            echo "::error::CONFIG_KPM=y is missing from the built .config"; exit 1; }
+          # kptools-linux + kpimg maintained by SukiSU Nova (SukiSU_patch/kpm)
+          TOOLS_DIR="$(mktemp -d)"
+          git clone --depth=1 --filter=blob:none --sparse https://github.com/SukiSU-Nova/SukiSU_patch.git "$TOOLS_DIR/sp"
+          git -C "$TOOLS_DIR/sp" sparse-checkout set kpm
+          cp "$TOOLS_DIR/sp/kpm/kptools-linux" "$TOOLS_DIR/sp/kpm/kpimg" "$IMG_DIR/"
+          rm -rf "$TOOLS_DIR"
+          cd "$IMG_DIR"
+          chmod +x ./kptools-linux
+          ./kptools-linux -p -i ./Image -k ./kpimg -o ./oImage
+          [ -s ./oImage ] || { echo "::error::KernelPatch injection produced an empty Image"; exit 1; }
+          mv -f oImage Image
+          rm -f kptools-linux kpimg
+          echo "KernelPatch (KPM) injected into Image."
 
       - name: 📦 Apply KPatch-Next (KPN)
         if: ${{ env.KERNEL_MODULE_IMPL == 'KPN' }}
