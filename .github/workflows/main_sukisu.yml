@@ -1,0 +1,1230 @@
+name: Build Lenovo TB322FC SukiSU Nova Kernel
+run-name: ${{ inputs.releases }}
+
+permissions:
+  contents: read
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_ref:
+        description: "SukiSU Nova branch/tag/commit (empty = builtin; main/dev have no in-kernel SUSFS)"
+        required: false
+        default: ''
+
+      releases:
+        description: "ZUXOS Version"
+        required: true
+        type: choice
+        options:
+          - '1.1.10.043 to 1.1.11.120'
+          - '1.1.11.188 to 1.5.10.117'
+          - '1.5.10.096'
+          - '1.5.10.183 to 1.5.10.294'
+        default: '1.5.10.183 to 1.5.10.294'
+
+      custom_kernel_suffix:
+        description: "Kernel suffix"
+        required: false
+        default: ''
+
+      custom_kernel_time:
+        description: "Build timestamp"
+        required: false
+        default: ''
+
+      kernel_module_impl:
+        description: "Kernel module implementation"
+        required: true
+        type: choice
+        options:
+          - 'N/A'
+          - 'KPN'
+        default: 'N/A'
+
+      enable_netfilter:
+        description: "Netfilter support"
+        required: true
+        default: true
+        type: boolean
+
+      enable_bbr_ecn:
+        description: "BBR+ECN support"
+        required: true
+        default: true
+        type: boolean
+
+      enable_unicode_bypass:
+        description: "Fix Unicode invisible character bypass support"
+        required: true
+        default: true
+        type: boolean
+
+      enable_susfs:
+        description: "SUSFS support"
+        required: true
+        default: true
+        type: boolean
+
+      usb_poll_1ms:
+        description: "USB mouse/keyboard polling 1 ms (1000 Hz)"
+        required: true
+        default: true
+        type: boolean
+
+      manager_package_name:
+        description: "Custom manager package name (empty = com.sukisu.nova)"
+        required: false
+        default: ''
+
+      manager_apk_url:
+        description: "Custom manager APK URL (auto-read signature + bundle it)"
+        required: false
+        default: ''
+
+      manager_sign_size:
+        description: "Custom manager signature size (e.g. 0x377), if no APK URL"
+        required: false
+        default: '0x02cb'
+
+      manager_sign_hash:
+        description: "Custom manager signature SHA-256, if no APK URL"
+        required: false
+        default: 'f67905ad7dc13109eda756db93ed67309ba44b7cb19856e89b9351a5c299dcd0'
+
+jobs:
+  build:
+    name: Build TB322FC ${{ inputs.releases }}
+    runs-on: ubuntu-24.04
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      KSU_TYPE: SukiSU-Nova
+      # Official SukiSU Nova repository (Forgejo). The GitHub repo is the mirror/fallback.
+      KSU_GIT_URL: https://git.zako.shirkneko.top:20004/shirkneko/SukiSU.git
+      KSU_FORGEJO_API: https://git.zako.shirkneko.top:20004/api/v1/repos/shirkneko/SukiSU
+      KSU_MIRROR_URL: https://github.com/SukiSU-Nova/SukiSU-Nova.git
+      KSU_REPO: SukiSU-Nova/SukiSU-Nova
+      KSU_DEFAULT_REF: builtin
+      KSU_DEFAULT_PACKAGE: com.sukisu.nova
+      KSU_REF_INPUT: ${{ inputs.ksu_ref }}
+      BUILD_TARGET: Build_Lenovo_TB322FC
+      KERNEL_RELEASE: ${{ inputs.releases }}
+      CUSTOM_KERNEL_SUFFIX: ${{ inputs.custom_kernel_suffix }}
+      CUSTOM_KERNEL_TIME: ${{ inputs.custom_kernel_time }}
+      KERNEL_MODULE_IMPL: ${{ inputs.kernel_module_impl }}
+      STOCK_BUILD_USER: kleaf
+      STOCK_BUILD_HOST: build-host
+      STOCK_COMPILER_INFO: Android (11368308, +pgo, +bolt, +lto, +mlgo, based on r510928) clang version 18.0.0
+      TOOLCHAIN_CACHE_ROOT: .toolchain-cache
+      ENABLE_NETFILTER: ${{ inputs.enable_netfilter }}
+      ENABLE_BBR_ECN: ${{ inputs.enable_bbr_ecn }}
+      ENABLE_UNICODE_BYPASS: ${{ inputs.enable_unicode_bypass }}
+      ENABLE_SUSFS: ${{ inputs.enable_susfs }}
+      USB_POLL_1MS: ${{ inputs.usb_poll_1ms }}
+      MANAGER_PACKAGE_INPUT: ${{ inputs.manager_package_name }}
+      MANAGER_APK_URL_INPUT: ${{ inputs.manager_apk_url }}
+      MANAGER_SIGN_SIZE_INPUT: ${{ inputs.manager_sign_size }}
+      MANAGER_SIGN_HASH_INPUT: ${{ inputs.manager_sign_hash }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: 🔎 Resolve TB322FC release
+        run: |
+          set -euo pipefail
+
+          case "$KERNEL_RELEASE" in
+            "1.1.10.043 to 1.1.11.120")
+              kernel_version='6.6.56'
+              default_suffix='-android15-8-g38447e018c92-ab12829524-4k'
+              default_kernel_time='Thu Dec 19 17:58:46 UTC 2024'
+              ;;
+            "1.1.11.188 to 1.5.10.117")
+              kernel_version='6.6.89'
+              default_suffix='-android15-8-g14220ae4ce65-ab13680582-4k'
+              default_kernel_time='Mon Jun 23 07:30:57 UTC 2025'
+              ;;
+            "1.5.10.096")
+              kernel_version='6.6.102'
+              default_suffix='-android15-8-g06bc416365ef-ab14559830-4k'
+              default_kernel_time='Tue Dec 9 15:43:22 UTC 2025'
+              ;;
+            "1.5.10.183 to 1.5.10.294")
+              kernel_version='6.6.118'
+              default_suffix='-android15-8-g350f378eb496-ab14943902-4k'
+              default_kernel_time='Thu Feb 26 02:40:50 UTC 2026'
+              ;;
+            *)
+              echo "::error::Unsupported TB322FC release: $KERNEL_RELEASE"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "KERNEL_VERSION=$kernel_version"
+            echo "DEFAULT_SUFFIX=$default_suffix"
+            echo "DEFAULT_KERNEL_TIME=$default_kernel_time"
+          } >> "$GITHUB_ENV"
+          echo "Release $KERNEL_RELEASE -> kernel $kernel_version ($default_suffix)"
+
+      - name: ⚙️ Set Kernel version config
+        run: |
+          if [ -z "$KERNEL_VERSION" ]; then
+            echo "::error::KERNEL_VERSION was not provided by the caller workflow"
+            exit 1
+          fi
+          if [ -z "$DEFAULT_SUFFIX" ]; then
+            echo "::error::DEFAULT_SUFFIX was not provided by the caller workflow"
+            exit 1
+          fi
+          if [ -z "$DEFAULT_KERNEL_TIME" ]; then
+            echo "::error::DEFAULT_KERNEL_TIME was not provided by the caller workflow"
+            exit 1
+          fi
+
+          echo "KERNEL_VERSION=$KERNEL_VERSION" >> $GITHUB_ENV
+
+          KERNEL_SERIES="${KERNEL_VERSION%.*}"
+          AOSP_COMMIT_PREFIX="$(printf '%s\n' "$DEFAULT_SUFFIX" | sed -nE 's/.*-g([0-9a-fA-F]+)-.*/\1/p' | tr 'A-F' 'a-f')"
+          if [ -z "$AOSP_COMMIT_PREFIX" ]; then
+            echo "::error::Failed to extract the AOSP commit hash from DEFAULT_SUFFIX='$DEFAULT_SUFFIX'"
+            exit 1
+          fi
+
+          COMMON_AOSP_TAG="$(
+            git ls-remote --tags https://android.googlesource.com/kernel/common "refs/tags/android*-${KERNEL_SERIES}-*" |
+              awk -v hash="$AOSP_COMMIT_PREFIX" '
+                $1 ~ "^" hash {
+                  ref = $2
+                  sub(/\^\{\}$/, "", ref)
+                  sub(/^refs\/tags\//, "", ref)
+                  print ref
+                }
+              ' |
+              sort -Vr |
+              head -n 1
+          )"
+          if [ -z "$COMMON_AOSP_TAG" ]; then
+            echo "::error::No AOSP tag found for kernel series '$KERNEL_SERIES' and commit prefix '$AOSP_COMMIT_PREFIX'"
+            exit 1
+          fi
+
+          os_patch_level="$(printf '%s\n' "$COMMON_AOSP_TAG" | sed -nE 's/^android[0-9]+-[0-9]+\.[0-9]+-([0-9]{4}-[0-9]{2})_r[0-9]+$/\1/p')"
+          if [ -z "$os_patch_level" ]; then
+            echo "::error::Failed to derive os_patch_level from COMMON_AOSP_TAG='$COMMON_AOSP_TAG'"
+            exit 1
+          fi
+
+          echo "Resolved AOSP commit prefix: $AOSP_COMMIT_PREFIX"
+          echo "Resolved COMMON_AOSP_TAG: $COMMON_AOSP_TAG"
+          echo "os_patch_level=$os_patch_level" >> $GITHUB_ENV
+          echo "COMMON_AOSP_TAG=$COMMON_AOSP_TAG" >> $GITHUB_ENV
+
+          if [ -z "$CUSTOM_KERNEL_SUFFIX" ]; then
+            echo "DEFAULT_SUFFIX=$DEFAULT_SUFFIX" >> $GITHUB_ENV
+            echo "Using stock kernel name: $DEFAULT_SUFFIX"
+          else
+            echo "Using custom name: $CUSTOM_KERNEL_SUFFIX"
+            echo "DEFAULT_SUFFIX=$CUSTOM_KERNEL_SUFFIX" >> $GITHUB_ENV
+          fi
+          if [ -z "$CUSTOM_KERNEL_TIME" ]; then
+            KERNEL_TIME="$DEFAULT_KERNEL_TIME"
+            echo "KERNEL_TIME=$KERNEL_TIME" >> $GITHUB_ENV
+            echo "Using stock kernel time: $KERNEL_TIME"
+          else
+            echo "Using custom build time: $CUSTOM_KERNEL_TIME"
+            echo "KERNEL_TIME=$CUSTOM_KERNEL_TIME" >> $GITHUB_ENV
+          fi
+
+      - name: 📥 Restore toolchain cache
+        id: toolchain-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ${{ env.TOOLCHAIN_CACHE_ROOT }}/clang18
+            ${{ env.TOOLCHAIN_CACHE_ROOT }}/build-tools
+          key: toolchain-clang-r510928-build-tools-r510928-v1
+
+      - name: 🛠 Install dependencies, initialize repo, and sync
+        run: |
+          rm -rf kernel_workspace
+          mkdir kernel_workspace
+          mkdir -p "${{ env.TOOLCHAIN_CACHE_ROOT }}"
+          cd kernel_workspace
+
+          # Every background job is tracked so a failed download fails this step
+          # instead of surfacing later as a confusing build error.
+          PIDS=()
+          NAMES=()
+          track() { PIDS+=("$!"); NAMES+=("$1"); }
+
+          (
+            sudo apt-mark hold firefox &&
+            sudo apt-mark hold libc-bin &&
+            sudo apt-get purge -y man-db &&
+            sudo rm -rf /var/lib/man-db/auto-update &&
+            sudo apt-get update &&
+            sudo apt-get install -y --no-install-recommends binutils python-is-python3 libssl-dev libelf-dev p7zip-full zstd
+          ) &
+          track "apt dependencies"
+
+          (
+            wget -q https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/ccache-x86-64 -O ccache &&
+            sudo cp -f ./ccache /usr/bin/ccache &&
+            sudo chmod +x /usr/bin/ccache &&
+            rm -f ./ccache
+          ) &
+          track "ccache binary"
+
+          echo "Cloning source repository..."
+          COMMON_ARCHIVE_URL="https://android.googlesource.com/kernel/common/+archive/refs/tags/${COMMON_AOSP_TAG}.tar.gz"
+          echo "Source archive: $COMMON_ARCHIVE_URL"
+          (
+            for i in 1 2 3; do
+              rm -rf common common.tar.gz common.tar.gz.aria2
+              if aria2c -s16 -x16 -k1M "$COMMON_ARCHIVE_URL" -o common.tar.gz \
+                 && gzip -t common.tar.gz \
+                 && mkdir -p common \
+                 && tar -xzf common.tar.gz -C common; then
+                rm -f common.tar.gz
+                exit 0
+              fi
+              echo "Download or extract failed (attempt $i)."
+              if [ "$i" -lt 3 ]; then sleep 60; fi
+            done
+            exit 1
+          ) &
+          track "kernel source"
+
+          if [ -d "../${{ env.TOOLCHAIN_CACHE_ROOT }}/clang18/bin" ]; then
+            echo "Restoring cached llvm-clang18 toolchain..."
+            cp -a "../${{ env.TOOLCHAIN_CACHE_ROOT }}/clang18" ./clang18 &
+          else
+            echo "Cloning llvm-clang18 toolchain..."
+            (
+              mkdir -p clang18 &&
+              aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang18-r510928/clang-r510928.zip -o clang.zip &&
+              unzip -q clang.zip -d clang18 &&
+              rm -rf clang.zip
+            ) &
+          fi
+          track "clang18 toolchain"
+
+          if [ -d "../${{ env.TOOLCHAIN_CACHE_ROOT }}/build-tools/bin" ]; then
+            echo "Restoring cached build tools..."
+            cp -a "../${{ env.TOOLCHAIN_CACHE_ROOT }}/build-tools" ./build-tools &
+          else
+            echo "Cloning build tools..."
+            (
+              aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang18-r510928/build-tools.zip -o build-tools.zip &&
+              unzip -q build-tools.zip &&
+              rm -rf build-tools.zip
+            ) &
+          fi
+          track "build tools"
+
+          FAILED=0
+          for idx in "${!PIDS[@]}"; do
+            if ! wait "${PIDS[$idx]}"; then
+              echo "::error::Background job failed: ${NAMES[$idx]}"
+              FAILED=1
+            fi
+          done
+          [ "$FAILED" -eq 0 ] || exit 1
+
+          if [ ! -d "../${{ env.TOOLCHAIN_CACHE_ROOT }}/clang18/bin" ] && [ -d "clang18/bin" ]; then
+            rm -rf "../${{ env.TOOLCHAIN_CACHE_ROOT }}/clang18"
+            cp -a clang18 "../${{ env.TOOLCHAIN_CACHE_ROOT }}/clang18"
+          fi
+          if [ ! -d "../${{ env.TOOLCHAIN_CACHE_ROOT }}/build-tools/bin" ] && [ -d "build-tools/bin" ]; then
+            rm -rf "../${{ env.TOOLCHAIN_CACHE_ROOT }}/build-tools"
+            cp -a build-tools "../${{ env.TOOLCHAIN_CACHE_ROOT }}/build-tools"
+          fi
+          echo "All sources and the llvm-Clang18 toolchain have been initialized!"
+          echo "Removing ABI protection files and the dirty suffix..."
+          rm common/android/abi_gki_protected_exports_* || true
+          for f in common/scripts/setlocalversion; do
+            sed -i 's/ -dirty//g' "$f"
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
+          done
+
+      - name: 📥 Save toolchain cache
+        if: ${{ steps.toolchain-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ${{ env.TOOLCHAIN_CACHE_ROOT }}/clang18
+            ${{ env.TOOLCHAIN_CACHE_ROOT }}/build-tools
+          key: toolchain-clang-r510928-build-tools-r510928-v1
+
+      - name: 🛠 Set ccache dir
+        run: |
+          ROOT_SOLUTION_KEY="${{ env.KSU_TYPE }}"
+          echo "ROOT_SOLUTION_KEY=$ROOT_SOLUTION_KEY" >> $GITHUB_ENV
+          echo "CCACHE_KEY=ccache-ECS-${ROOT_SOLUTION_KEY}-${KERNEL_VERSION}" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache_${ROOT_SOLUTION_KEY}_${KERNEL_VERSION}" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=10G" >> $GITHUB_ENV
+          echo "Current disk space:"
+          df -h
+          echo "Kernel version being built: $KERNEL_VERSION"
+
+      - name: 🛠 Set build identity
+        working-directory: kernel_workspace/common
+        run: |
+          set -e
+          if [ -f "scripts/mkcompile_h" ]; then
+            if grep -q "LINUX_COMPILE_BY=" scripts/mkcompile_h; then
+              sed -i "s|LINUX_COMPILE_BY=.*|LINUX_COMPILE_BY=\"${{ env.STOCK_BUILD_USER }}\"|" scripts/mkcompile_h
+              sed -i "s|LINUX_COMPILE_HOST=.*|LINUX_COMPILE_HOST=\"${{ env.STOCK_BUILD_HOST }}\"|" scripts/mkcompile_h
+            fi
+            if grep -q "LINUX_COMPILER=" scripts/mkcompile_h; then
+              sed -i "s|LINUX_COMPILER=.*|LINUX_COMPILER=\"${{ env.STOCK_COMPILER_INFO }}\"|" scripts/mkcompile_h
+            fi
+          fi
+          echo "KBUILD_BUILD_USER=${{ env.STOCK_BUILD_USER }}" >> "$GITHUB_ENV"
+          echo "KBUILD_BUILD_HOST=${{ env.STOCK_BUILD_HOST }}" >> "$GITHUB_ENV"
+          echo "Using build user: ${{ env.STOCK_BUILD_USER }}"
+          echo "Using build host: ${{ env.STOCK_BUILD_HOST }}"
+          echo "Using compiler info: ${{ env.STOCK_COMPILER_INFO }}"
+
+      - name: 📥 Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CCACHE_KEY }}-latest
+          restore-keys: |
+            ${{ env.CCACHE_KEY }}-
+
+      - name: 🔎 Find public ccache in releases
+        id: public-ccache
+        if: ${{ steps.ccache-restore.outputs.cache-matched-key == '' }}
+        uses: actions/github-script@v9
+        env:
+          PUBLIC_CACHE_REPO: ${{ vars.PUBLIC_CACHE_REPO }}
+          PUBLIC_CACHE_TAG: ${{ vars.PUBLIC_CACHE_TAG }}
+        with:
+          script: |
+            const repoName = process.env.PUBLIC_CACHE_REPO || 'showdo/Public_Ccache';
+            const releaseTag = process.env.PUBLIC_CACHE_TAG || 'exported-ccaches';
+            const [owner, repo] = repoName.split('/');
+            const deviceName = process.env.KERNEL_VERSION;
+            let selected = null;
+
+            const escape_regex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const exactAssetName = `ccache-${deviceName}.tar.zst`;
+            const legacyAssetPattern = new RegExp(`^ccache-(.+-)?${escape_regex(deviceName)}(-[0-9]+)?\\.tar\\.zst$`);
+
+            core.info(`No matching ccache found in the current repository. Searching public cache by device: ${deviceName}`);
+            core.info(`Cache source repository: ${owner}/${repo}`);
+            core.info(`Cache source tag: ${releaseTag}`);
+            core.info(`Preferred public cache asset: ${exactAssetName}`);
+
+            let release;
+            try {
+              const response = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag: releaseTag,
+              });
+              release = response.data;
+            } catch (error) {
+              core.info(`Public cache release not found: ${releaseTag}`);
+              return;
+            }
+
+            for (const asset of release.assets || []) {
+              const isExactMatch = asset.name === exactAssetName;
+              const isLegacyMatch = legacyAssetPattern.test(asset.name);
+              if (isExactMatch || isLegacyMatch) {
+                const shouldReplace =
+                  !selected ||
+                  (isExactMatch && !selected.exact) ||
+                  (isExactMatch === selected.exact && new Date(asset.updated_at) > new Date(selected.updated_at));
+
+                if (shouldReplace) {
+                  selected = {
+                    name: asset.name,
+                    updated_at: asset.updated_at,
+                    tag: release.tag_name,
+                    repo: `${owner}/${repo}`,
+                    exact: isExactMatch,
+                  };
+                }
+              }
+            }
+
+            if (!selected) {
+              core.info('No usable public ccache asset found. Continuing with an empty cache.');
+              return;
+            }
+
+            core.info(`Found public cache: ${selected.name} (${selected.repo}@${selected.tag})`);
+            core.setOutput('asset-name', selected.name);
+            core.setOutput('release-tag', selected.tag);
+            core.setOutput('source-repo', selected.repo);
+
+      - name: 📦 Restore public ccache from releases
+        if: ${{ steps.ccache-restore.outputs.cache-matched-key == '' && steps.public-ccache.outputs.asset-name != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLIC_CACHE_REPO: ${{ steps.public-ccache.outputs.source-repo }}
+          PUBLIC_CACHE_TAG: ${{ steps.public-ccache.outputs.release-tag }}
+          PUBLIC_CACHE_ASSET: ${{ steps.public-ccache.outputs.asset-name }}
+        run: |
+          set -euo pipefail
+          echo "No matching cache found in the current repository. Downloading public cache: $PUBLIC_CACHE_ASSET"
+          rm -f "$PUBLIC_CACHE_ASSET"
+          rm -rf "$CCACHE_DIR"
+          gh release download "$PUBLIC_CACHE_TAG" --repo "$PUBLIC_CACHE_REPO" --pattern "$PUBLIC_CACHE_ASSET" --dir .
+          TEMP_EXTRACT_DIR="$(mktemp -d)"
+          tar --use-compress-program=unzstd -xf "$PUBLIC_CACHE_ASSET" -C "$TEMP_EXTRACT_DIR"
+          EXTRACTED_CCACHE_DIR="$(find "$TEMP_EXTRACT_DIR" -maxdepth 1 -mindepth 1 -type d -name '.ccache_*' | head -n 1)"
+          if [ -z "$EXTRACTED_CCACHE_DIR" ]; then
+            echo "::error::No .ccache_* directory found after extracting the public cache"
+            exit 1
+          fi
+
+          mkdir -p "$CCACHE_DIR"
+          shopt -s dotglob nullglob
+          mv "$EXTRACTED_CCACHE_DIR"/* "$CCACHE_DIR"/
+          shopt -u dotglob nullglob
+          rm -rf "$TEMP_EXTRACT_DIR"
+          test -d "$CCACHE_DIR"
+          ls -lah "$CCACHE_DIR" | head -n 20
+          echo "PUBLIC_CCACHE_USED=true" >> "$GITHUB_ENV"
+          echo "Public cache restore completed: $CCACHE_DIR"
+
+      - name: 📥 Init ccache
+        run: |
+          # Set ccache environment variables
+          export CCACHE_COMPILERCHECK="none"
+          export CCACHE_BASEDIR="${{ github.workspace }}"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_NOHARDLINK="true"
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
+
+          # Ensure the ccache directory exists
+          mkdir -p "$CCACHE_DIR"
+
+          # Reconfigure cache size on every run
+          echo "Configuring ccache max size: $CCACHE_MAXSIZE"
+          ccache -M "$CCACHE_MAXSIZE"
+          ccache -o compression=true
+
+          # Show initial cache status
+          echo "Initial ccache status:"
+          ccache -s
+
+          # Show detailed info when cache restore hits
+          if [ -n "${{ steps.ccache-restore.outputs.cache-matched-key }}" ]; then
+            echo "ccache hit details: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
+            ccache -sv
+          elif [ "${PUBLIC_CCACHE_USED:-false}" = 'true' ]; then
+            echo "Public ccache restored. Current cache details:"
+            ccache -sv
+          else
+            echo "No repository cache hit and no public cache found. Building with an empty cache."
+          fi
+
+      - name: ⚙️ Apply zstd 1.5.7 and CVE-2026-43499 patches
+        run: |
+          set -euo pipefail
+          cd kernel_workspace
+          git clone --depth=1 https://github.com/cctv18/oppo_oplus_realme_sm8750.git
+          PATCH_SRC="$PWD/oppo_oplus_realme_sm8750"
+          cd ./common
+
+          # lz4 1.10.0 (001-lz4.patch) is not applied: it targets the OPlus vendor tree
+          # (fs/f2fs/lz4armv8) and does not apply to AOSP GKI. Inside the Actions checkout
+          # `git apply` skipped it silently, so earlier builds never contained it either.
+
+          # zstd 1.5.7: one cosmetic hunk in portability_macros.h (Apple/i386 macros) is
+          # rejected on 6.6.118; every other hunk applies.
+          patch -p1 -F 3 --forward < "$PATCH_SRC/zram_patch/002-zstd.patch" || true
+          ZSTD_REJ="$(find . -name '*.rej' | sort)"
+          if [ -n "$ZSTD_REJ" ]; then
+            echo "::notice::zstd patch rejected hunks: $(echo "$ZSTD_REJ" | tr '\n' ' ')"
+            find . -name '*.rej' -delete
+            find . -name '*.orig' -delete
+          fi
+
+          # CVE-2026-43499 (rtmutex remove_waiter UAF), fixed upstream in 6.6.140.
+          CVE_PATCH="$PATCH_SRC/other_patch/cve-2026-43499-rtmutex-6.6.patch"
+          if patch -p1 -R --dry-run -s -f < "$CVE_PATCH" >/dev/null 2>&1; then
+            echo "CVE-2026-43499 fix already present in this kernel source."
+          elif patch -p1 --dry-run -s < "$CVE_PATCH" >/dev/null 2>&1; then
+            patch -p1 -s < "$CVE_PATCH"
+            echo "Applied CVE-2026-43499 fix."
+          else
+            echo "::warning::CVE-2026-43499 patch does not apply cleanly; skipped."
+          fi
+
+          rm -rf "$PATCH_SRC"
+
+      - name: ⚙️ Set SukiSU Nova
+        run: |
+          set -euo pipefail
+          cd kernel_workspace
+          KSU_SETUP_REF="$(printf '%s' "${KSU_REF_INPUT:-}" | tr -d '[:space:]')"
+          KSU_SETUP_REF="${KSU_SETUP_REF:-$KSU_DEFAULT_REF}"
+
+          # The upstream setup.sh clones from git.zako.shirkneko.top without a timeout and can
+          # hang on GitHub runners, so do the same steps here with a timeout and a GitHub fallback.
+          rm -rf KernelSU
+          KSU_SOURCE=""
+          for i in 1 2; do
+            echo "Cloning SukiSU Nova from ${KSU_GIT_URL} (attempt $i)..."
+            if timeout 600 git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 \
+                 clone "$KSU_GIT_URL" KernelSU; then
+              KSU_SOURCE="$KSU_GIT_URL"
+              break
+            fi
+            rm -rf KernelSU
+            sleep 10
+          done
+          if [ -z "$KSU_SOURCE" ]; then
+            echo "::warning::${KSU_GIT_URL} is unreachable. Falling back to the GitHub mirror ${KSU_MIRROR_URL}."
+            git clone "$KSU_MIRROR_URL" KernelSU
+            KSU_SOURCE="$KSU_MIRROR_URL"
+          fi
+
+          cd KernelSU
+          git checkout "$KSU_SETUP_REF"
+          # kernel/Makefile counts commits on the local 'main' branch when the API is unavailable
+          if ! git show-ref --verify --quiet refs/heads/main && git show-ref --verify --quiet refs/remotes/origin/main; then
+            git branch main origin/main
+          fi
+          KSU_COMMIT_SHA="$(git rev-parse HEAD)"
+          cd ..
+
+          # Same as kernel/setup.sh: link drivers/kernelsu and hook it into Makefile/Kconfig
+          DRIVER_DIR="$PWD/common/drivers"
+          ln -sfn "$(realpath --relative-to="$DRIVER_DIR" "$PWD/KernelSU/kernel")" "$DRIVER_DIR/kernelsu"
+          grep -q "kernelsu" "$DRIVER_DIR/Makefile" || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> "$DRIVER_DIR/Makefile"
+          grep -q 'source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig" || sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' "$DRIVER_DIR/Kconfig"
+
+          # kernel/Kbuild (main/dev) or kernel/Makefile (builtin) holds the build options
+          if [ -f KernelSU/kernel/Kbuild ]; then
+            KSU_BUILD_FILE="$PWD/KernelSU/kernel/Kbuild"
+          else
+            KSU_BUILD_FILE="$PWD/KernelSU/kernel/Makefile"
+          fi
+
+          {
+            echo "KSU_SETUP_REF=$KSU_SETUP_REF"
+            echo "KSU_COMMIT_SHA=$KSU_COMMIT_SHA"
+            echo "KSU_BUILD_FILE=$KSU_BUILD_FILE"
+          } >> "$GITHUB_ENV"
+          echo "SukiSU Nova source: $KSU_SOURCE"
+          echo "SukiSU Nova ref: $KSU_SETUP_REF"
+          echo "SukiSU Nova commit: $KSU_COMMIT_SHA"
+          echo "(The KernelSU version number is computed by $(basename "$KSU_BUILD_FILE") during the build; see the '-- SukiSU... version' line in the build log.)"
+
+      - name: 🔑 Configure custom manager (package name / signature)
+        run: |
+          set -euo pipefail
+          cd kernel_workspace
+
+          PKG="$(printf '%s' "$MANAGER_PACKAGE_INPUT" | tr -d '[:space:]')"
+          APK_URL="$(printf '%s' "$MANAGER_APK_URL_INPUT" | tr -d '[:space:]')"
+          SIGN_SIZE="$(printf '%s' "$MANAGER_SIGN_SIZE_INPUT" | tr -d '[:space:]')"
+          SIGN_HASH="$(printf '%s' "$MANAGER_SIGN_HASH_INPUT" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+          KSU_KBUILD="$KSU_BUILD_FILE"
+          KSU_APK_SIGN_C="$(readlink -f common/drivers/kernelsu)/manager/apk_sign.c"
+
+          if [ -z "$PKG$APK_URL$SIGN_SIZE$SIGN_HASH" ]; then
+            echo "No custom manager requested. Using SukiSU Nova's built-in manager signatures (package $KSU_DEFAULT_PACKAGE)."
+            exit 0
+          fi
+
+          # 1) Read the signing certificate from the APK (same logic as kernel/manager/apk_sign.c)
+          if [ -n "$APK_URL" ]; then
+            if [ -n "$SIGN_SIZE$SIGN_HASH" ]; then
+              echo "::notice::manager_apk_url is set; manager_sign_size/hash inputs are ignored."
+            fi
+            curl -fLSs --retry 3 "$APK_URL" -o custom_manager.apk
+            # Command substitution (not < <(...)) so a parser failure stops the step under set -e
+            SIGN_INFO="$(python3 -I - custom_manager.apk <<'PY'
+          import hashlib, struct, sys, zipfile
+
+          def fail(msg):
+              print(f"::error::{msg}", file=sys.stderr)
+              sys.exit(1)
+
+          path = sys.argv[1]
+          data = open(path, "rb").read()
+          eocd = data.rfind(b"PK\x05\x06")
+          if eocd < 0:
+              fail("Not a valid APK/ZIP (EOCD not found)")
+          cd_offset = struct.unpack_from("<I", data, eocd + 16)[0]
+          if data[cd_offset - 16:cd_offset] != b"APK Sig Block 42":
+              fail("APK has no APK Signing Block. Sign it with the v2 scheme.")
+          block_size = struct.unpack_from("<Q", data, cd_offset - 24)[0]
+          pos = cd_offset - block_size - 8
+          if struct.unpack_from("<Q", data, pos)[0] != block_size:
+              fail("Corrupted APK Signing Block")
+          pos += 8
+          end = cd_offset - 24
+          v2 = []
+          while pos < end:
+              pair_len = struct.unpack_from("<Q", data, pos)[0]
+              pair_id = struct.unpack_from("<I", data, pos + 8)[0]
+              value = data[pos + 12:pos + 8 + pair_len]
+              if pair_id == 0x7109871A:
+                  v2.append(value)
+              elif pair_id != 0x42726577:  # verity padding
+                  fail(f"Unexpected signing block 0x{pair_id:08x}: SukiSU Nova only accepts a lone v2 signature block (disable v3/v4 signing)")
+              pos += 8 + pair_len
+          if len(v2) != 1:
+              fail(f"Expected exactly one v2 signature block, found {len(v2)}")
+          zipfile.ZipFile(path).close()  # sanity check: must be a readable ZIP
+
+          def lp(buf, off):
+              n = struct.unpack_from("<I", buf, off)[0]
+              return buf[off + 4:off + 4 + n], off + 4 + n
+
+          signers, _ = lp(v2[0], 0)
+          signer, _ = lp(signers, 0)
+          signed_data, _ = lp(signer, 0)
+          _, off = lp(signed_data, 0)        # digests
+          certs, _ = lp(signed_data, off)    # certificates
+          cert, _ = lp(certs, 0)             # first certificate
+          if len(cert) > 1024:
+              fail(f"Certificate is {len(cert)} bytes; SukiSU Nova accepts at most 1024")
+          print(hex(len(cert)), hashlib.sha256(cert).hexdigest())
+          PY
+            )"
+            read -r SIGN_SIZE SIGN_HASH <<< "$SIGN_INFO"
+            echo "Signature read from APK: size=$SIGN_SIZE hash=$SIGN_HASH"
+
+            # Cross-check the package name when aapt2 from the runner's Android SDK is available
+            AAPT2="$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/build-tools/*/aapt2 2>/dev/null | sort -V | tail -n 1 || true)"
+            if [ -n "$AAPT2" ]; then
+              APK_PKG="$("$AAPT2" dump packagename custom_manager.apk 2>/dev/null | tr -d '[:space:]' || true)"
+              echo "APK package name: ${APK_PKG:-unknown}"
+              if [ -n "$PKG" ] && [ -n "$APK_PKG" ] && [ "$PKG" != "$APK_PKG" ]; then
+                echo "::error::manager_package_name '$PKG' does not match the APK package '$APK_PKG'"
+                exit 1
+              fi
+            fi
+          fi
+
+          # 2) Validate inputs
+          if [ -n "$SIGN_SIZE$SIGN_HASH" ]; then
+            if [ -z "$SIGN_SIZE" ] || [ -z "$SIGN_HASH" ]; then
+              echo "::error::manager_sign_size and manager_sign_hash must be set together"
+              exit 1
+            fi
+            if ! printf '%s' "$SIGN_SIZE" | grep -qE '^(0[xX][0-9a-fA-F]+|[1-9][0-9]*)$'; then
+              echo "::error::manager_sign_size must be decimal or hex like 0x377 (got '$SIGN_SIZE')"
+              exit 1
+            fi
+            if [ $((SIGN_SIZE)) -gt 1024 ]; then
+              echo "::error::manager_sign_size $SIGN_SIZE exceeds SukiSU Nova's 1024-byte certificate limit"
+              exit 1
+            fi
+            if ! printf '%s' "$SIGN_HASH" | grep -qE '^[0-9a-f]{64}$'; then
+              echo "::error::manager_sign_hash must be a 64-character SHA-256 hex string"
+              exit 1
+            fi
+            if grep -q 'apk_sign_keys\[\] = {' "$KSU_APK_SIGN_C" 2>/dev/null; then
+              # builtin branch: signatures are a table in manager/apk_sign.c. Add ours on top;
+              # the official SukiSU Nova / KernelSU keys stay accepted.
+              sed -i "/apk_sign_keys\[\] = {/a\\    { $SIGN_SIZE, \"$SIGN_HASH\" }, // custom manager (CI)" "$KSU_APK_SIGN_C"
+              grep -n "custom manager (CI)" "$KSU_APK_SIGN_C"
+            elif grep -qE '^KSU_EXPECTED_SIZE[[:space:]]*\?=' "$KSU_KBUILD"; then
+              # main/dev: one signature slot that REPLACES the official SukiSU Nova key
+              {
+                echo "KSU_EXPECTED_SIZE=$SIGN_SIZE"
+                echo "KSU_EXPECTED_HASH=$SIGN_HASH"
+              } >> "$GITHUB_ENV"
+              echo "::notice::This ref has a single signature slot; the official SukiSU Nova manager will not be accepted."
+            elif grep -qE '^KSU_EXPECTED_SIZE[[:space:]]*:=' "$KSU_KBUILD"; then
+              sed -i -E "s|^KSU_EXPECTED_SIZE[[:space:]]*:=.*|KSU_EXPECTED_SIZE := $SIGN_SIZE|; s|^KSU_EXPECTED_HASH[[:space:]]*:=.*|KSU_EXPECTED_HASH := $SIGN_HASH|" "$KSU_KBUILD"
+              echo "::notice::This ref has a single signature slot; the official SukiSU Nova manager will not be accepted."
+            else
+              echo "::error::Could not find where this SukiSU Nova ref stores manager signatures"
+              exit 1
+            fi
+            echo "CUSTOM_MANAGER_HASH=$SIGN_HASH" >> "$GITHUB_ENV"
+            echo "Custom manager signature: size=$SIGN_SIZE hash=$SIGN_HASH"
+          else
+            echo "::notice::No custom signature given. The manager must still be signed with a built-in SukiSU Nova/KernelSU key."
+          fi
+
+          if [ -n "$PKG" ]; then
+            if ! printf '%s' "$PKG" | grep -qE '^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$'; then
+              echo "::error::Invalid Android package name: '$PKG'"
+              exit 1
+            fi
+            if [ "${#PKG}" -ge 256 ]; then
+              echo "::error::Package name is too long"
+              exit 1
+            fi
+            if ! grep -qE '^KSU_PACKAGE_NAME[[:space:]]*\?=' "$KSU_KBUILD"; then
+              echo "::error::This SukiSU Nova ref does not support overriding KSU_PACKAGE_NAME"
+              exit 1
+            fi
+            # Read by kernel/Makefile (KSU_PACKAGE_NAME ?= com.sukisu.nova) through the environment
+            echo "KSU_PACKAGE_NAME=$PKG" >> "$GITHUB_ENV"
+            echo "Kernel will only accept the manager package: $PKG"
+          else
+            echo "Kernel will accept the manager package: $KSU_DEFAULT_PACKAGE"
+          fi
+
+          if [ -f custom_manager.apk ]; then
+            echo "CUSTOM_MANAGER_APK=$PWD/custom_manager.apk" >> "$GITHUB_ENV"
+          fi
+
+      - name: 🔧 Set up SUSFS
+        if: ${{ env.ENABLE_SUSFS == 'true' }}
+        run: |
+          cd kernel_workspace
+          SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
+          SUSFS_BRANCH="gki-android15-6.6"
+          git clone --depth=1 "$SUSFS_REPO" susfs4ksu -b "$SUSFS_BRANCH"
+          SUSFS_DIR="${PWD}/susfs4ksu"
+          cp "${SUSFS_DIR}/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch" ./common/
+          cp "${SUSFS_DIR}/kernel_patches/fs/"* ./common/fs/
+          cp "${SUSFS_DIR}/kernel_patches/include/linux/"* ./common/include/linux/
+          cd ./common
+          fake_patched=0
+          if ! grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
+            echo "Missing nr_subpages. Applying temporary SUSFS compatibility fix."
+            sed -i -e '/int ret = 0, copied = 0;/a \\tunsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;' -e '/int ret = 0, copied = 0;/a \\tpagemap_entry_t \*res = NULL;' ./fs/proc/task_mmu.c
+            fake_patched=1
+          fi
+          if ! grep -qxF '#include <linux/dma-buf.h>' ./fs/proc/base.c; then
+            echo "Missing <linux/dma-buf.h>. Adding temporary include for SUSFS patch."
+            sed -i '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' ./fs/proc/base.c
+          fi
+          patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
+          if [ "$fake_patched" = 1 ]; then
+            if grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
+              sed -i -e '/unsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;/d' -e '/pagemap_entry_t \*res = NULL;/d' ./fs/proc/task_mmu.c
+            fi
+          fi
+          REJECTS="$(find . -name '*.rej' -newer 50_add_susfs_in_gki-android15-6.6.patch 2>/dev/null || true)"
+          if [ -n "$REJECTS" ]; then
+            echo "::warning::SUSFS patch left rejected hunks: $(echo "$REJECTS" | tr '\n' ' ')"
+          fi
+
+      - name: 🔧 Check SukiSU Nova SUSFS support
+        if: ${{ env.ENABLE_SUSFS == 'true' }}
+        run: |
+          set -euo pipefail
+          cd kernel_workspace
+          KSU_DIR="$(readlink -f common/drivers/kernelsu)"
+          has_cfg() { grep -qE "^[[:space:]]*config[[:space:]]+$1([[:space:]]|$)" "$KSU_DIR/Kconfig"; }
+          # Only the builtin branch carries the in-kernel SUSFS hooks; main/dev moved SUSFS to a module.
+          if ! has_cfg KSU_SUSFS; then
+            echo "::error::SukiSU Nova ref '${KSU_SETUP_REF}' has no in-kernel SUSFS (no KSU_SUSFS in Kconfig). Leave ksu_ref empty (builtin) or turn off enable_susfs."
+            exit 1
+          fi
+          SYM=KSU_SUSFS_PRIORITY_UID_FILTER
+          if has_cfg "$SYM"; then
+            echo "SukiSU Nova Kconfig defines ${SYM}."
+          elif grep -rqs "susfs_set_priority_uid_filter\|susfs_parse_priority_app_strings" "$KSU_DIR"; then
+            echo "::error::This SukiSU Nova ref calls the SUSFS priority UID filter but does not define ${SYM}; the kernel would fail to link. Leave ksu_ref empty to build builtin."
+            exit 1
+          else
+            echo "::notice::This SukiSU Nova ref has no priority UID filter support; the feature will be absent."
+          fi
+
+      - name: 🔧 Set gki_defconfig
+        run: |
+          cd kernel_workspace
+          DEFCONFIG=./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU=y" >> "$DEFCONFIG"
+
+          if [ "${{ env.ENABLE_SUSFS }}" = 'true' ]; then
+            # SUSFS options defined by SukiSU Nova's builtin kernel/Kconfig
+            {
+              echo "CONFIG_KSU_SUSFS=y"
+              echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+              echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+              echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+              echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+              echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+              echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+              echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+              echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+              echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+              echo "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y"
+            } >> "$DEFCONFIG"
+          fi
+
+          echo "CONFIG_TMPFS_XATTR=y" >> "$DEFCONFIG"
+          echo "CONFIG_TMPFS_POSIX_ACL=y" >> "$DEFCONFIG"
+
+          if [ "${{ env.ENABLE_BBR_ECN }}" = 'true' ]; then
+            {
+              echo "CONFIG_TCP_CONG_ADVANCED=y"
+              echo "CONFIG_TCP_CONG_BBR=y"
+              echo "CONFIG_NET_SCH_FQ=y"
+              echo "CONFIG_TCP_CONG_BIC=n"
+              echo "CONFIG_TCP_CONG_WESTWOOD=n"
+              echo "CONFIG_TCP_CONG_HTCP=n"
+              echo "CONFIG_IP_ECN=y"
+              echo "CONFIG_TCP_ECN=y"
+              echo "CONFIG_IPV6_ECN=y"
+              echo "CONFIG_IP_NF_TARGET_ECN=y"
+            } >> "$DEFCONFIG"
+          fi
+
+          if [ "${{ env.ENABLE_NETFILTER }}" = 'true' ]; then
+            {
+              echo "CONFIG_BPF_STREAM_PARSER=y"
+              echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y"
+              echo "CONFIG_NETFILTER_XT_SET=y"
+              echo "CONFIG_IP_SET=y"
+              echo "CONFIG_IP_SET_MAX=65534"
+              echo "CONFIG_IP_SET_BITMAP_IP=y"
+              echo "CONFIG_IP_SET_BITMAP_IPMAC=y"
+              echo "CONFIG_IP_SET_BITMAP_PORT=y"
+              echo "CONFIG_IP_SET_HASH_IP=y"
+              echo "CONFIG_IP_SET_HASH_IPMARK=y"
+              echo "CONFIG_IP_SET_HASH_IPPORT=y"
+              echo "CONFIG_IP_SET_HASH_IPPORTIP=y"
+              echo "CONFIG_IP_SET_HASH_IPPORTNET=y"
+              echo "CONFIG_IP_SET_HASH_IPMAC=y"
+              echo "CONFIG_IP_SET_HASH_MAC=y"
+              echo "CONFIG_IP_SET_HASH_NETPORTNET=y"
+              echo "CONFIG_IP_SET_HASH_NET=y"
+              echo "CONFIG_IP_SET_HASH_NETNET=y"
+              echo "CONFIG_IP_SET_HASH_NETPORT=y"
+              echo "CONFIG_IP_SET_HASH_NETIFACE=y"
+              echo "CONFIG_IP_SET_LIST_SET=y"
+              echo "CONFIG_IP6_NF_NAT=y"
+              echo "CONFIG_IP6_NF_TARGET_MASQUERADE=y"
+            } >> "$DEFCONFIG"
+          fi
+
+          echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$DEFCONFIG"
+
+          #Remove check_defconfig
+          sudo sed -i 's/check_defconfig//' ./common/build.config.gki
+
+      - name: 🔧 Apply Netfilter config compatibility patch
+        if: ${{ env.ENABLE_NETFILTER == 'true' }}
+        run: |
+          cd kernel_workspace/common
+          wget https://raw.githubusercontent.com/cctv18/oppo_oplus_realme_sm8750/main/other_patch/config.patch -O config.patch
+          patch -p1 -F 3 < config.patch || true
+          rm -f config.patch
+
+      - name: 🔧 Apply Unicode Bypass patch
+        if: ${{ env.ENABLE_UNICODE_BYPASS == 'true' }}
+        run: |
+          cd kernel_workspace/common
+          wget https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/unicode_bypass_fix_6.1%2B.patch -O unicode_bypass_fix_6.1+.patch
+          patch -p1 --forward < unicode_bypass_fix_6.1+.patch || true
+          rm -f unicode_bypass_fix_6.1+.patch
+
+      - name: 🖱️ Set USB HID polling to 1 ms
+        if: ${{ env.USB_POLL_1MS == 'true' }}
+        run: |
+          set -euo pipefail
+          cd kernel_workspace/common
+          HIDC=drivers/hid/usbhid/hid-core.c
+          # Default 0 uses the interval each device declares. 1 forces 1 ms for USB
+          # (wired or 2.4 GHz dongle) mice and keyboards; Bluetooth is unaffected.
+          # Still adjustable at runtime: /sys/module/usbhid/parameters/{mousepoll,kbpoll}
+          for VAR in hid_mousepoll_interval hid_kbpoll_interval; do
+            if ! grep -qx "static unsigned int ${VAR};" "$HIDC"; then
+              echo "::error::'static unsigned int ${VAR};' not found in $HIDC; usbhid source changed."
+              exit 1
+            fi
+            sed -i "s/^static unsigned int ${VAR};$/static unsigned int ${VAR} = 1;/" "$HIDC"
+          done
+          grep -n "hid_mousepoll_interval = 1;\|hid_kbpoll_interval = 1;" "$HIDC"
+
+      - name: 🔧 Set kernel name
+        run: |
+          cd kernel_workspace
+          echo "Custom suffix: $DEFAULT_SUFFIX"
+          ESCAPED_SUFFIX=$(printf '%s\n' "$DEFAULT_SUFFIX" | sed 's:[\/&]:\\&:g')
+          sudo sed -i "s/-4k/$ESCAPED_SUFFIX/g" ./common/arch/arm64/configs/gki_defconfig
+          sed -i 's/${scm_version}//' ./common/scripts/setlocalversion
+
+      - name: 📥 Start build timer
+        run:
+          echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
+
+      - name: 🔨 Build kernel
+        run: |
+          WORKDIR="$(pwd)"
+          export PATH="/usr/lib/ccache:$PATH"
+          export PATH="$WORKDIR/kernel_workspace/clang18/bin:$PATH"
+          export PATH="$WORKDIR/kernel_workspace/build-tools/bin:$PATH"
+          CLANG_DIR="$WORKDIR/kernel_workspace/clang18/bin"
+          CLANG_VERSION="$($CLANG_DIR/clang --version | head -n 1)"
+          LLD_VERSION="$($CLANG_DIR/ld.lld --version | head -n 1)"
+          echo "Compiler info:"
+          echo "Clang version: $CLANG_VERSION"
+          echo "LLD version: $LLD_VERSION"
+          pahole_version=$(pahole --version 2>/dev/null | head -n1); [ -z "$pahole_version" ] && echo "pahole version: not installed" || echo "pahole version: $pahole_version"
+
+          export CCACHE_LOGFILE="${{ github.workspace }}/kernel_workspace/ccache.log"
+          export CCACHE_COMPILERCHECK="none"
+          export CCACHE_BASEDIR="${{ github.workspace }}"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_NOHARDLINK="true"
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
+          export CCACHE_IS_KERNEL_COMPILING="true"
+          SLOPPINESS="sloppiness = file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros"
+          grep -qxF "$SLOPPINESS" "$CCACHE_DIR/ccache.conf" 2>/dev/null || echo "$SLOPPINESS" >> "$CCACHE_DIR/ccache.conf"
+
+          cd kernel_workspace/common
+          wget https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/libfakestat.so
+          wget https://github.com/cctv18/oppo_oplus_realme_sm8750/raw/refs/heads/main/lib/libfaketimeMT.so
+          chmod 777 ./*.so
+          export FAKESTAT="2025-05-25 12:00:00"
+          export FAKETIME="@2025-05-25 13:00:00"
+          echo "FAKESTAT=$FAKESTAT" >> $GITHUB_ENV
+          echo "FAKETIME=$FAKETIME" >> $GITHUB_ENV
+          SO_DIR=$(pwd)
+          export PRELOAD_LIBS="$SO_DIR/libfakestat.so $SO_DIR/libfaketimeMT.so"
+          export KBUILD_BUILD_USER="${{ env.STOCK_BUILD_USER }}"
+          export KBUILD_BUILD_HOST="${{ env.STOCK_BUILD_HOST }}"
+          # Create the CC (compiler) wrapper
+          echo '#!/bin/bash' > cc-wrapper
+          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> cc-wrapper
+          echo 'export FAKESTAT="'$FAKESTAT'"' >> cc-wrapper
+          echo 'export FAKETIME="'$FAKETIME'"' >> cc-wrapper
+          echo 'ccache clang "$@"' >> cc-wrapper
+          # Create the LD (linker) wrapper
+          echo '#!/bin/bash' > ld-wrapper
+          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> ld-wrapper
+          echo 'export FAKESTAT="'$FAKESTAT'"' >> ld-wrapper
+          echo 'export FAKETIME="'$FAKETIME'"' >> ld-wrapper
+          echo 'ld.lld "$@"' >> ld-wrapper
+
+          # Verify that time hijacking works correctly
+          echo "--- [Wrapper Test] Creating a generic time hijack test script ---"
+          echo '#!/bin/bash' > test-wrapper.sh
+          echo 'export LD_PRELOAD="'$PRELOAD_LIBS'"' >> test-wrapper.sh
+          echo 'export FAKESTAT="'$FAKESTAT'"' >> test-wrapper.sh
+          echo 'export FAKETIME="'$FAKETIME'"' >> test-wrapper.sh
+          echo 'echo ">>> Wrapper internal environment check complete."' >> test-wrapper.sh
+          echo 'exec "$@"' >> test-wrapper.sh # Execute all passed arguments
+          chmod +x test-wrapper.sh
+          echo "--- [Wrapper Test] Testing the date command ---"
+          ./test-wrapper.sh date
+          echo "--- [Wrapper Test] Testing the stat command ---"
+          ./test-wrapper.sh stat ./Makefile
+          echo "--- [Wrapper Test] Test completed ---"
+          chmod +x cc-wrapper ld-wrapper
+          echo "--- Pre-build environment time: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
+          echo "--- Pre-build environment file timestamp: ---"
+          LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
+
+          export KBUILD_BUILD_TIMESTAMP="${KERNEL_TIME}"
+
+          # Clear unnecessary .NET, Android NDK, Haskell, and CodeQL runtimes while the kernel builds to free space without blocking later steps
+          sudo rm -rf /usr/share/dotnet &
+          sudo rm -rf /usr/local/lib/android &
+          sudo rm -rf /opt/ghc &
+          sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="ccache clang" HOSTCC="ccache clang" HOSTCXX="ccache clang++" LD="ld.lld" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig &&
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$(pwd)/cc-wrapper" HOSTCC="ccache clang" HOSTCXX="ccache clang++" LD="$(pwd)/ld-wrapper" HOSTLD=ld.lld O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error Image
+
+          # Secondary time hijack verification after the build
+          echo "--- Post-build environment time: $(LD_PRELOAD=$PRELOAD_LIBS date) ---"
+          echo "--- Post-build environment file timestamp: ---"
+          LD_PRELOAD=$PRELOAD_LIBS stat ./Makefile
+          echo "Kernel build completed!"
+
+          # Confirm the custom manager settings really ended up in the kernel image
+          IMG=out/arch/arm64/boot/Image
+          if [ -n "${CUSTOM_MANAGER_HASH:-}" ]; then
+            grep -qaF "$CUSTOM_MANAGER_HASH" "$IMG" || { echo "::error::Custom manager hash not found in Image"; exit 1; }
+            echo "Verified: custom manager signature is in the Image."
+          fi
+          MANAGER_PKG="${KSU_PACKAGE_NAME:-$KSU_DEFAULT_PACKAGE}"
+          grep -qaF "$MANAGER_PKG" "$IMG" || { echo "::error::Manager package name '$MANAGER_PKG' not found in Image"; exit 1; }
+          echo "Verified: manager package '$MANAGER_PKG' is in the Image."
+          echo "ccache status:"
+          ccache -s
+          echo "Disk space after build:"
+          df -h
+
+      - name: 🕒 Calculate build time
+        run: |
+          END=$(date +%s)
+          TIME=$((END - BUILD_START))
+          echo "BUILD_TIME=$TIME" >> $GITHUB_ENV
+          echo "Build time: $TIME seconds"
+
+      - name: 📥 Save ccache if needed
+        if: ${{ env.BUILD_TIME > 480 || steps.ccache-restore.outputs.cache-matched-key == '' }}
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CCACHE_KEY }}-${{ github.run_id }}
+
+      - name: 🧹 Clean old ccache
+        if: env.BUILD_TIME > 480
+        uses: actions/github-script@v9
+        env:
+          PREFIX: ${{ env.CCACHE_KEY }}
+          CURRENT_KEY: ${{ env.CCACHE_KEY }}-${{ github.run_id }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const prefix = process.env.PREFIX;
+            const currentKey = process.env.CURRENT_KEY;
+            let page = 1;
+            let deleted = 0;
+
+            core.info('Build time exceeded 8 minutes. ccache has been saved.');
+            core.info(`Cleaning old caches with matching prefix: ${prefix}`);
+
+            while (true) {
+              const response = await github.rest.actions.getActionsCacheList({
+                owner,
+                repo,
+                per_page: 100,
+                page,
+              });
+
+              const caches = response.data.actions_caches || [];
+              if (caches.length === 0) {
+                break;
+              }
+
+              for (const cache of caches) {
+                if (cache.key.startsWith(prefix) && cache.key !== currentKey) {
+                  core.info(`Deleting cache: ${cache.key} (ID: ${cache.id})`);
+                  await github.rest.actions.deleteActionsCacheById({
+                    owner,
+                    repo,
+                    cache_id: cache.id,
+                  });
+                  deleted++;
+                }
+              }
+
+              if (caches.length < 100) {
+                break;
+              }
+              page++;
+            }
+
+            core.info(`Old cache cleanup completed. Deleted ${deleted} caches.`);
+
+      - name: 📦 Apply KPatch-Next (KPN)
+        if: ${{ env.KERNEL_MODULE_IMPL == 'KPN' }}
+        run: |
+          echo "Applying kernel module implementation patch: KPN"
+          cd kernel_workspace/common/out/arch/arm64/boot
+          PATCH_TOOL_REPO="KernelSU-Next/KPatch-Next"
+          PATCH_TOOL_RELEASE_JSON="$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${PATCH_TOOL_REPO}/releases/latest")"
+          PATCH_TOOL_KPTOOLS_URL="$(printf '%s' "$PATCH_TOOL_RELEASE_JSON" | python3 -c "import json,sys; data=json.load(sys.stdin); print(next(asset['browser_download_url'] for asset in data['assets'] if asset['name'] == 'kptools-linux'))")"
+          PATCH_TOOL_KPIMG_URL="$(printf '%s' "$PATCH_TOOL_RELEASE_JSON" | python3 -c "import json,sys; data=json.load(sys.stdin); print(next(asset['browser_download_url'] for asset in data['assets'] if asset['name'] == 'kpimg-linux'))")"
+          curl -fLSs "$PATCH_TOOL_KPTOOLS_URL" -o ./kptools-linux
+          curl -fLSs "$PATCH_TOOL_KPIMG_URL" -o ./kpimg-linux
+          chmod +x ./kptools-linux ./kpimg-linux
+          ./kptools-linux -p -i ./Image -k ./kpimg-linux -o ./oImage
+          rm -f Image
+          mv oImage Image
+
+      - name: 📦 Rename image
+        run: |
+          cd kernel_workspace/common/out/arch/arm64/boot
+          cp ./Image "./kernel"
+
+      - name: 🏷️ Set kernel artifact name
+        run: |
+          AOSP_KERNEL_SERIES="$(printf '%s\n' "$COMMON_AOSP_TAG" | sed -E 's/^(android[0-9]+-[0-9]+\.[0-9]+).*/\1/')"
+          if [ -z "$AOSP_KERNEL_SERIES" ]; then
+            echo "::error::Failed to derive kernel series from COMMON_AOSP_TAG='$COMMON_AOSP_TAG'"
+            exit 1
+          fi
+          KERNEL_BUNDLE_NAME="${ROOT_SOLUTION_KEY}_kernel-${AOSP_KERNEL_SERIES}"
+          echo "KERNEL_BUNDLE_NAME=$KERNEL_BUNDLE_NAME" >> "$GITHUB_ENV"
+          echo "Kernel artifact name: $KERNEL_BUNDLE_NAME"
+
+      - name: 📦 Prepare kernel bundle
+        run: |
+          BUNDLE_DIR="${GITHUB_WORKSPACE}/kernel_workspace/upload_bundle"
+          rm -rf "$BUNDLE_DIR"
+          mkdir -p "$BUNDLE_DIR"
+          cp kernel_workspace/common/out/arch/arm64/boot/kernel "$BUNDLE_DIR/kernel"
+
+      - name: 📥 Download SukiSU Nova manager APK
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          BUNDLE_DIR="${GITHUB_WORKSPACE}/kernel_workspace/upload_bundle"
+
+          if [ -n "${CUSTOM_MANAGER_APK:-}" ]; then
+            cp "$CUSTOM_MANAGER_APK" "$BUNDLE_DIR/Manager-custom.apk"
+            echo "Bundled the custom manager APK instead of the official SukiSU Nova manager."
+            exit 0
+          fi
+          if [ -n "${KSU_PACKAGE_NAME:-}" ] && [ "$KSU_PACKAGE_NAME" != "$KSU_DEFAULT_PACKAGE" ]; then
+            echo "::notice::Kernel is locked to '$KSU_PACKAGE_NAME'; the official manager below will NOT be accepted. Install your own build."
+          fi
+
+          # SukiSU Nova builds its manager on Forgejo, so take the APK from the latest release:
+          # the Forgejo release first, then the GitHub mirror's release.
+          ABI_PATTERN='arm64-v8a.*\.apk$'
+          pick_apk() {
+            python3 -c '
+          import json, re, sys
+          pattern = re.compile(sys.argv[1])
+          data = json.load(sys.stdin)
+          assets = data.get("assets", [])
+          apks = [a for a in assets if a.get("name", "").endswith(".apk")]
+          best = [a for a in apks if pattern.search(a["name"])] or apks
+          if best:
+              print(data.get("tag_name", ""), best[0]["name"], best[0]["browser_download_url"])
+          ' "$ABI_PATTERN"
+          }
+
+          RESULT=""
+          if JSON="$(curl -fsSL --connect-timeout 20 --max-time 60 "${KSU_FORGEJO_API}/releases/latest" 2>/dev/null)"; then
+            RESULT="$(printf '%s' "$JSON" | pick_apk || true)"
+            [ -n "$RESULT" ] && echo "Using the release from git.zako.shirkneko.top"
+          fi
+          if [ -z "$RESULT" ]; then
+            echo "::notice::Forgejo release not reachable; using the GitHub release of ${KSU_REPO}."
+            JSON="$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${KSU_REPO}/releases/latest")"
+            RESULT="$(printf '%s' "$JSON" | pick_apk || true)"
+          fi
+          if [ -z "$RESULT" ]; then
+            echo "::error::No manager APK found in the latest SukiSU Nova release"
+            exit 1
+          fi
+
+          read -r TAG APK_NAME APK_URL <<< "$RESULT"
+          echo "Manager release: $TAG -> $APK_NAME"
+          curl -fLSs --retry 3 "$APK_URL" -o "$BUNDLE_DIR/$APK_NAME"
+
+          APK_COUNT=$(find "$BUNDLE_DIR" -maxdepth 1 -type f -name "*.apk" | wc -l)
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "::error::Manager APK was not downloaded"
+            exit 1
+          fi
+          find "$BUNDLE_DIR" -maxdepth 1 -type f -printf "%f\n"
+
+      - name: 📤 Upload kernel bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.KERNEL_BUNDLE_NAME }}
+          path: kernel_workspace/upload_bundle/*
